@@ -1,0 +1,7 @@
+state/*.json
+workspace/
+__pycache__/
+.env
+.venv/
+venv/
+*.pyc
