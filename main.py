@@ -1,20 +1,55 @@
 #!/usr/bin/env python3
-"""Agentic Dev Team v0. Requirement -> PM -> Review -> Backend Agent."""
+"""Agentic Dev Team v0. Requirement -> PM -> Review -> Frontend/Backend Agents."""
 
 import sys
 import uuid
-from datetime import datetime
 
-from schemas import Requirement, StoryPack
+from schemas import Requirement
 from state_store import requirement_path, save, storypack_path
 from agents.pm_agent import create_stories
 from agents.backend_agent import implement_backend
+from agents.frontend_agent import implement_frontend
+
+
+def _run_frontend(stories):
+    if not stories:
+        print("No frontend stories.")
+        return True
+
+    print("\nImplementing frontend stories...")
+    for story in stories:
+        ok, msg = implement_frontend(story)
+        if ok:
+            print(f"  {story.id} {story.title}: {msg}")
+        else:
+            print(f"  {story.id} {story.title}: FAILED")
+            print(msg)
+            return False
+    return True
+
+
+def _run_backend(stories):
+    if not stories:
+        print("No backend stories.")
+        return True
+
+    print("\nImplementing backend stories...")
+    for story in stories:
+        ok, msg = implement_backend(story)
+        if ok:
+            print(f"  {story.id} {story.title}: {msg}")
+        else:
+            print(f"  {story.id} {story.title}: FAILED")
+            print(msg)
+            return False
+    return True
 
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python main.py \"Your requirement here\"")
         sys.exit(1)
+
     text = " ".join(sys.argv[1:])
     req_id = f"req_{uuid.uuid4().hex[:8]}"
 
@@ -44,20 +79,19 @@ def main():
     pack.status = "approved"
     save(storypack_path(pack.id), pack.model_dump())
 
+    frontend_stories = [s for s in pack.stories if s.ownership == "frontend"]
     backend_stories = [s for s in pack.stories if s.ownership == "backend"]
-    if not backend_stories:
-        print("No backend stories. Done.")
+
+    if not frontend_stories and not backend_stories:
+        print("No stories to implement. Done.")
         return
 
-    print("\nImplementing backend stories...")
-    for story in backend_stories:
-        ok, msg = implement_backend(story)
-        if ok:
-            print(f"  {story.id} {story.title}: {msg}")
-        else:
-            print(f"  {story.id} {story.title}: FAILED")
-            print(msg)
-            sys.exit(1)
+    if not _run_frontend(frontend_stories):
+        sys.exit(1)
+
+    if not _run_backend(backend_stories):
+        sys.exit(1)
+
     print("\nDone.")
 
 

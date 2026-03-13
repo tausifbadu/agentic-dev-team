@@ -1,0 +1,18 @@
+Build a REST API that polls crude oil price data from an external source and forwards it to a configurable webhook URL.
+
+Architecture:
+- Background job (or scheduled task) runs every 5 seconds
+- Fetches WTI crude oil price from a free source (use yfinance, symbol CL=F, no API key required; or document that an API key is needed if using another provider)
+- POSTs the payload (symbol, price, timestamp) as JSON to a webhook URL
+- Webhook URL must be configurable via WEBHOOK_URL environment variable
+- Expose GET /ticker that returns the most recent price received or fetched
+
+Technical requirements:
+- FastAPI, Python 3.11+
+- Use Pydantic for request/response models
+- For polling: use yfinance or httpx to call a free REST API
+- For forwarding: use httpx to POST to the webhook
+- All external HTTP calls (poll source, webhook POST) must be mocked in tests—tests must not hit real networks or require API keys
+- Include tests using FastAPI TestClient that verify: (1) GET /ticker returns expected structure, (2) the polling/forward logic works with mocked HTTP
+
+Break this into small, implementable user stories. Each story should have clear acceptance criteria. Tag ownership as "backend" for all stories.
