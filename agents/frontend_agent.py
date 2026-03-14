@@ -1,6 +1,7 @@
-"""Frontend Agent. Patching mode for React/HTML/CSS. Returns (success, message)."""
+"""Frontend Agent. Planner-first React patching with isolated validation."""
 
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -9,6 +10,15 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from agents.reasoning import (
+    create_scratch_copy,
+    load_json,
+    promote_scratch_copy,
+    render_context,
+    save_json,
+    select_relevant_files,
+    update_scope,
+)
 from schemas import Story
 
 WORKSPACE = Path(__file__).parent.parent / "workspace"
@@ -16,62 +26,43 @@ FRONTEND = WORKSPACE / "frontend"
 SCOPE_FILE = WORKSPACE / "scope.json"
 DEBUG_DIR = WORKSPACE / "debug"
 
-SYSTEM_PROMPT = """You are a Frontend Developer. EXTEND the existing frontend codebase to implement the new story. Do NOT remove or break existing functionality.
-
-Tech stack requirements:
-- React + JavaScript/TypeScript
-- HTML/CSS for UI styling
-- Keep implementation simple, readable, and local-dev friendly
-
-Workspace expectations:
-- frontend/package.json
-- frontend/src/... for React app code
-- frontend/index.html
-
-Rules:
-- Preserve existing code; patch/add only required files.
-- Use additive changes; avoid rewriting unrelated files.
-- If story asks for live crude oil values, consume backend ticker endpoint by polling `/ticker` every few seconds unless story explicitly says otherwise.
-- If webhook is mentioned in UI story, treat it as data source context and display data from backend API unless a direct browser-safe stream endpoint is explicitly provided.
-- Include minimal styling (CSS) and clear user-visible states: loading, error, data.
-- Output JSON only. Format:
-{
-  "files": [
-    {"path": "relative/path/from/frontend", "content": "full file content"}
-  ],
-  "dependencies_add": ["package1", "package2"],
-  "dev_dependencies_add": ["packageA"]
-}
-- Only include files you modify/create.
-- Ensure app builds with `npm run build`.
-"""
-
-JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY valid JSON matching this schema:
-{
-  "files": [{"path": "relative/path", "content": "full file content"}],
-  "dependencies_add": ["pkg"],
-  "dev_dependencies_add": ["pkg"]
-}
-No markdown fences. No commentary."""
-
-RETRY_PROMPT = """Frontend checks failed. Fix code/build issues using this output and return corrected JSON only."""
-
+MODEL_NAME = os.getenv("FRONTEND_AGENT_MODEL", "gpt-4o-mini")
 MAX_RETRIES = 2
 MAX_JSON_PARSE_RETRIES = 2
 
+PLANNER_PROMPT = """You are a frontend implementation planner for a React app.
+Return JSON only:
+{
+  "summary": "short plan summary",
+  "files_to_touch": ["src/App.jsx", "src/styles.css"],
+  "acceptance_map": [{"criterion": "AC", "implementation": "UI behavior"}],
+  "validation_steps": ["build", "runtime states"],
+  "risk_checks": ["regressions to avoid"]
+}
 
-def _load_scope() -> dict:
-    if not SCOPE_FILE.exists():
-        return {"implemented_stories": [], "last_updated": None}
-    with open(SCOPE_FILE, encoding="utf-8") as f:
-        return json.load(f)
+Rules:
+- Prefer additive changes.
+- Map every acceptance criterion to a concrete UI state or interaction.
+- If backend data is needed, use the backend API contract rather than assuming direct webhook access in the browser.
+"""
 
+CODER_PROMPT = """You are a Frontend Developer extending an existing React app.
 
-def _save_scope(scope: dict) -> None:
-    SCOPE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    scope["last_updated"] = datetime.utcnow().isoformat()
-    with open(SCOPE_FILE, "w", encoding="utf-8") as f:
-        json.dump(scope, f, indent=2)
+Hard constraints:
+- Preserve existing functionality.
+- Use focused additive patches only.
+- Provide visible loading, error, and data states when data fetching is involved.
+- Keep the UI simple and local-dev friendly.
+- Output JSON only:
+{
+  "files": [{"path": "relative/path/from/frontend", "content": "full file content"}],
+  "dependencies_add": ["package1"],
+  "dev_dependencies_add": ["package2"]
+}
+"""
+
+JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY valid JSON matching the requested schema. No markdown fences. No commentary."""
+BUILD_RETRY_PROMPT = """Frontend checks failed. First determine whether the issue is in build config, runtime assumptions, or component code. Fix the smallest correct layer and return corrected JSON only."""
 
 
 def _store_raw_response(raw: str) -> None:
@@ -80,53 +71,105 @@ def _store_raw_response(raw: str) -> None:
     out.write_text(raw, encoding="utf-8")
 
 
-def _read_existing_frontend() -> str:
-    if not FRONTEND.exists():
-        return "(empty frontend workspace)"
-    include_ext = {".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".json", ".md"}
-    lines = []
-    for p in sorted(FRONTEND.rglob("*")):
-        if not p.is_file() or p.suffix.lower() not in include_ext:
-            continue
-        if "node_modules" in str(p):
-            continue
-        rel = p.relative_to(FRONTEND)
-        lines.append(f"=== {rel} ===\n{p.read_text(encoding='utf-8')}\n")
-    return "\n".join(lines) if lines else "(empty frontend workspace)"
-
-
-def _call_llm(client: OpenAI, messages: list[dict]) -> dict:
-    local_messages = list(messages)
+def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str) -> dict:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
     errors: list[str] = []
-
     for _ in range(MAX_JSON_PARSE_RETRIES + 1):
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=local_messages,
+            model=MODEL_NAME,
+            messages=messages,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
         content = (response.choices[0].message.content or "").strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
         try:
             return json.loads(content)
-        except json.JSONDecodeError as e:
-            errors.append(str(e))
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
             _store_raw_response(content)
-            local_messages.append({"role": "assistant", "content": content})
-            local_messages.append({"role": "user", "content": JSON_RETRY_PROMPT})
-
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": JSON_RETRY_PROMPT})
     raise ValueError("Invalid JSON from frontend model after retries: " + " | ".join(errors))
 
 
-def _ensure_package_json() -> None:
-    FRONTEND.mkdir(parents=True, exist_ok=True)
-    pkg = FRONTEND / "package.json"
+def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+    siblings = [
+        {
+            "id": item.id,
+            "title": item.title,
+            "ownership": item.ownership,
+            "acceptance_criteria": item.acceptance_criteria,
+        }
+        for item in sibling_stories
+        if item.id != story.id
+    ]
+    return json.dumps(
+        {
+            "requirement": requirement_text,
+            "story": story.model_dump(),
+            "sibling_stories": siblings,
+            "implemented_scope": load_json(SCOPE_FILE, {"implemented_stories": []}),
+        },
+        indent=2,
+    )
+
+
+def _read_existing_frontend(story: Story, requirement_text: str) -> str:
+    text = " ".join(
+        [
+            requirement_text,
+            story.title,
+            story.description,
+            *story.acceptance_criteria,
+            *story.implementation_notes,
+            *story.test_focus,
+        ]
+    )
+    files = select_relevant_files(FRONTEND, text, {".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".json"}, max_files=10)
+    return render_context(FRONTEND, files)
+
+
+def _plan_frontend_change(client: OpenAI, story: Story, requirement_text: str, sibling_stories: list[Story]) -> dict:
+    prompt = f"""Planning payload:
+{_story_bundle(story, requirement_text, sibling_stories)}
+
+Focused frontend context:
+{_read_existing_frontend(story, requirement_text)}
+"""
+    return _call_llm_json(client, prompt, PLANNER_PROMPT)
+
+
+def _generate_frontend_patch(
+    client: OpenAI,
+    story: Story,
+    requirement_text: str,
+    sibling_stories: list[Story],
+    plan: dict,
+    error_output: str = "",
+) -> dict:
+    retry_block = f"\nPrevious validation failure:\n{error_output}\n" if error_output else ""
+    prompt = f"""Implementation payload:
+{_story_bundle(story, requirement_text, sibling_stories)}
+
+Approved plan:
+{json.dumps(plan, indent=2)}
+
+Focused frontend context:
+{_read_existing_frontend(story, requirement_text)}
+{retry_block}
+Return only changed files and dependency additions.
+"""
+    if error_output:
+        return _call_llm_json(client, prompt + "\n" + BUILD_RETRY_PROMPT, CODER_PROMPT)
+    return _call_llm_json(client, prompt, CODER_PROMPT)
+
+
+def _ensure_package_json(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    pkg = root / "package.json"
     if pkg.exists():
         return
     pkg.write_text(
@@ -136,18 +179,9 @@ def _ensure_package_json() -> None:
                 "private": True,
                 "version": "0.1.0",
                 "type": "module",
-                "scripts": {
-                    "dev": "vite",
-                    "build": "vite build",
-                    "preview": "vite preview"
-                },
-                "dependencies": {
-                    "react": "^18.3.1",
-                    "react-dom": "^18.3.1"
-                },
-                "devDependencies": {
-                    "vite": "^5.4.0"
-                }
+                "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+                "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
+                "devDependencies": {"vite": "^5.4.0"},
             },
             indent=2,
         ),
@@ -177,106 +211,81 @@ def _merge_deps(pkg_path: Path, deps: list[str], dev_deps: list[str]) -> None:
     pkg_path.write_text(json.dumps(pkg, indent=2), encoding="utf-8")
 
 
-def _apply_changes(data: dict) -> None:
-    _ensure_package_json()
-
-    for f in data.get("files", []):
-        path = FRONTEND / f["path"]
+def _apply_changes(data: dict, root: Path) -> None:
+    _ensure_package_json(root)
+    for file_change in data.get("files", []):
+        path = root / file_change["path"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f["content"], encoding="utf-8")
-
-    pkg_path = FRONTEND / "package.json"
-    _merge_deps(pkg_path, data.get("dependencies_add", []), data.get("dev_dependencies_add", []))
-
+        path.write_text(file_change["content"], encoding="utf-8")
+    _merge_deps(root / "package.json", data.get("dependencies_add", []), data.get("dev_dependencies_add", []))
 
 
 def _npm_command() -> list[str] | None:
-    """Return a runnable npm command across Windows/macOS/Linux."""
     npm_exe = shutil.which("npm") or shutil.which("npm.cmd")
     if not npm_exe:
         return None
-
-    # npm on Windows is usually a .cmd shim; execute via cmd for reliability.
     if npm_exe.lower().endswith(".cmd"):
         return ["cmd", "/c", npm_exe]
     return [npm_exe]
-def _run_frontend_checks() -> tuple[bool, str]:
+
+
+def _run_frontend_checks(root: Path) -> tuple[bool, str]:
     npm_cmd = _npm_command()
     if not npm_cmd:
-        return (
-            False,
-            "npm not found. Install Node.js and ensure npm is available in PATH for this Python process.",
-        )
+        return False, "npm not found. Install Node.js and ensure npm is available in PATH for this Python process."
 
-    install = subprocess.run(
-        [*npm_cmd, "install"],
-        cwd=FRONTEND,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    install = subprocess.run([*npm_cmd, "install"], cwd=root, capture_output=True, text=True, check=False)
     if install.returncode != 0:
         return False, f"npm install failed:\n{install.stderr}\n{install.stdout}"
 
-    build = subprocess.run(
-        [*npm_cmd, "run", "build"],
-        cwd=FRONTEND,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    build = subprocess.run([*npm_cmd, "run", "build"], cwd=root, capture_output=True, text=True, check=False)
     if build.returncode != 0:
         return False, f"npm run build failed:\n{build.stderr}\n{build.stdout}"
 
+    dist_index = root / "dist" / "index.html"
+    if not dist_index.exists():
+        return False, "npm run build succeeded but dist/index.html was not created."
     return True, ""
 
-def implement_frontend(story: Story) -> tuple[bool, str]:
+
+def implement_frontend(
+    story: Story,
+    requirement_text: str = "",
+    sibling_stories: list[Story] | None = None,
+) -> tuple[bool, str]:
+    """Plan, patch, validate in scratch, and promote only on success."""
     client = OpenAI()
-    scope = _load_scope()
-    existing = _read_existing_frontend()
-
-    user_content = f"""Existing frontend codebase:
-{existing}
-
----
-NEW STORY to implement:
-Title: {story.title}
-Description: {story.description}
-Acceptance criteria: {story.acceptance_criteria}
-
-Extend the frontend codebase. Preserve existing functionality. Output JSON with files/dependencies."""
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    siblings = sibling_stories or []
+    last_error = ""
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            data = _call_llm(client, messages)
-        except ValueError as e:
-            if attempt < MAX_RETRIES:
-                messages.append({"role": "user", "content": f"{JSON_RETRY_PROMPT}\n\nError: {e}"})
-                continue
-            return False, f"Frontend JSON parsing failed after {MAX_RETRIES + 1} attempts: {e}"
+            plan = _plan_frontend_change(client, story, requirement_text, siblings)
+            patch = _generate_frontend_patch(client, story, requirement_text, siblings, plan, last_error)
+        except ValueError as exc:
+            return False, str(exc)
 
-        _apply_changes(data)
-        ok, output = _run_frontend_checks()
-
+        scratch = create_scratch_copy(FRONTEND, "frontend_attempt")
+        _apply_changes(patch, scratch)
+        ok, output = _run_frontend_checks(scratch)
         if ok:
-            implemented = scope.get("implemented_stories", [])
-            if story.id not in implemented:
-                implemented.append(story.id)
-                scope["implemented_stories"] = implemented
-            _save_scope(scope)
+            promote_scratch_copy(scratch, FRONTEND)
+            scope = update_scope(
+                SCOPE_FILE,
+                {
+                    "id": story.id,
+                    "title": story.title,
+                    "owner": "frontend",
+                    "summary": plan.get("summary", story.description),
+                    "applied_at": datetime.utcnow().isoformat(),
+                },
+            )
+            save_json(SCOPE_FILE, scope)
             retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
-            return True, f"Patched {FRONTEND}. build passed{retry_note}. Scope: {scope['implemented_stories']}"
+            return True, f"Patched {FRONTEND}. build passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
+        last_error = output
 
-        if attempt < MAX_RETRIES:
-            messages.append({"role": "assistant", "content": json.dumps(data)})
-            messages.append({"role": "user", "content": f"{RETRY_PROMPT}\n\nBuild output:\n{output}"})
-        else:
-            return False, f"frontend checks failed after {MAX_RETRIES + 1} attempts:\n{output}"
+    return False, f"frontend checks failed after {MAX_RETRIES + 1} attempts:\n{last_error}"
 
 
 

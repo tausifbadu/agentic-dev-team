@@ -17,6 +17,8 @@ class Story(BaseModel):
     title: str
     description: str
     acceptance_criteria: list[str]
+    implementation_notes: list[str] = Field(default_factory=list)
+    test_focus: list[str] = Field(default_factory=list)
     ownership: Literal["frontend", "backend"]
     status: Literal["pending_review", "approved", "rejected", "in_progress", "done"] = "pending_review"
 

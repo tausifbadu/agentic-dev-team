@@ -1,6 +1,7 @@
-"""PM Agent. One LLM call. No tools. Returns StoryPack."""
+"""PM Agent. Produces implementation-ready stories with stronger structure."""
 
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,9 @@ from openai import OpenAI
 
 from schemas import Requirement, Story, StoryPack
 
-SYSTEM_PROMPT = """You are a Product Manager. Given a requirement, produce user stories.
+MODEL_NAME = os.getenv("PM_AGENT_MODEL", "gpt-4o-mini")
+
+SYSTEM_PROMPT = """You are a Product Manager. Given a requirement, produce implementation-ready user stories for engineering agents.
 
 Output JSON only. No markdown, no explanation. Format:
 {
@@ -19,6 +22,8 @@ Output JSON only. No markdown, no explanation. Format:
       "title": "Short title",
       "description": "One sentence",
       "acceptance_criteria": ["AC1", "AC2"],
+      "implementation_notes": ["Important design note"],
+      "test_focus": ["What must be tested"],
       "ownership": "frontend" or "backend"
     }
   ]
@@ -28,6 +33,9 @@ Rules:
 - Each story has one ownership: frontend or backend
 - Acceptance criteria must be testable
 - Keep stories small and focused
+- Add implementation_notes that tell coding agents what matters technically
+- Add test_focus that tells coding agents how to validate the story
+- Split mixed concerns into separate frontend/backend stories when useful
 - Use ids: story_1, story_2, ..."""
 
 JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY valid JSON matching this schema:
@@ -38,6 +46,8 @@ JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY va
       "title": "Short title",
       "description": "One sentence",
       "acceptance_criteria": ["AC1", "AC2"],
+      "implementation_notes": ["Important design note"],
+      "test_focus": ["What must be tested"],
       "ownership": "frontend" or "backend"
     }
   ]
@@ -63,7 +73,7 @@ def _call_pm_llm(client: OpenAI, requirement_text: str) -> dict:
 
     for _ in range(MAX_JSON_PARSE_RETRIES + 1):
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=MODEL_NAME,
             messages=messages,
             temperature=0.3,
             response_format={"type": "json_object"},
@@ -89,7 +99,13 @@ def _call_pm_llm(client: OpenAI, requirement_text: str) -> dict:
 def create_stories(requirement: Requirement) -> StoryPack:
     client = OpenAI()
     data = _call_pm_llm(client, requirement.text)
-    stories = [Story(**s) for s in data["stories"]]
+    normalized = []
+    for index, story in enumerate(data["stories"], start=1):
+        item = dict(story)
+        item["id"] = f"{requirement.id}_story_{index}"
+        normalized.append(item)
+
+    stories = [Story(**s) for s in normalized]
     return StoryPack(
         id=f"pack_{uuid.uuid4().hex[:8]}",
         requirement_id=requirement.id,

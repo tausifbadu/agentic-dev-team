@@ -4,21 +4,21 @@
 import sys
 import uuid
 
-from schemas import Requirement
+from schemas import Requirement, StoryPack
 from state_store import requirement_path, save, storypack_path
 from agents.pm_agent import create_stories
 from agents.backend_agent import implement_backend
 from agents.frontend_agent import implement_frontend
 
 
-def _run_frontend(stories):
+def _run_frontend(stories, pack: StoryPack):
     if not stories:
         print("No frontend stories.")
         return True
 
     print("\nImplementing frontend stories...")
     for story in stories:
-        ok, msg = implement_frontend(story)
+        ok, msg = implement_frontend(story, pack.requirement_text, pack.stories)
         if ok:
             print(f"  {story.id} {story.title}: {msg}")
         else:
@@ -28,14 +28,14 @@ def _run_frontend(stories):
     return True
 
 
-def _run_backend(stories):
+def _run_backend(stories, pack: StoryPack):
     if not stories:
         print("No backend stories.")
         return True
 
     print("\nImplementing backend stories...")
     for story in stories:
-        ok, msg = implement_backend(story)
+        ok, msg = implement_backend(story, pack.requirement_text, pack.stories)
         if ok:
             print(f"  {story.id} {story.title}: {msg}")
         else:
@@ -66,6 +66,10 @@ def main():
         print(f"  {s.description}")
         for ac in s.acceptance_criteria:
             print(f"  - {ac}")
+        for note in s.implementation_notes:
+            print(f"  note: {note}")
+        for test_focus in s.test_focus:
+            print(f"  test: {test_focus}")
     print("\n" + "=" * 60)
     print("Type 'approve' or 'reject': ", end="", flush=True)
     choice = input().strip().lower()
@@ -86,10 +90,10 @@ def main():
         print("No stories to implement. Done.")
         return
 
-    if not _run_frontend(frontend_stories):
+    if not _run_frontend(frontend_stories, pack):
         sys.exit(1)
 
-    if not _run_backend(backend_stories):
+    if not _run_backend(backend_stories, pack):
         sys.exit(1)
 
     print("\nDone.")

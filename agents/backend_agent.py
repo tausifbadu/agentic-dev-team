@@ -1,6 +1,7 @@
-"""Backend Agent. Patching mode: extends existing codebase. Returns (success, message)."""
+"""Backend Agent. Planner-first patching mode with isolated validation."""
 
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -9,6 +10,15 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from agents.reasoning import (
+    create_scratch_copy,
+    load_json,
+    promote_scratch_copy,
+    render_context,
+    save_json,
+    select_relevant_files,
+    update_scope,
+)
 from schemas import Story
 
 WORKSPACE = Path(__file__).parent.parent / "workspace"
@@ -16,239 +26,219 @@ BACKEND = WORKSPACE / "backend"
 SCOPE_FILE = WORKSPACE / "scope.json"
 DEBUG_DIR = WORKSPACE / "debug"
 
-SYSTEM_PROMPT = """You are a Backend Developer. EXTEND the existing codebase to implement the new story. Do NOT remove or break existing functionality.
-
-Workspace structure:
-- main.py: app entry, includes routers via app.include_router(...)
-- routers/<feature>.py: APIRouter for each domain (e.g. routers/ticker.py, routers/health.py)
-- services/: business logic
-- models/: Pydantic models
-- tests/test_<feature>.py: tests per feature
-
-Rules:
-- PRESERVE all existing code. Add new routers, routes, services. Update main.py to include new routers.
-- Use FastAPI, Pydantic, APScheduler for background tasks. NO fastapi-utils.
-- Add ALL imported packages to requirements.txt (including httpx).
-- Mock ALL external HTTP in tests (yfinance, httpx.post, httpx.get). Tests must not hit real networks.
-- Use lifespan context manager (NOT on_event). Each router can have start/stop helpers called from main lifespan.
-- Output JSON only. Format:
-{
-  "files": [
-    {"path": "relative/path/from/backend", "content": "full file content"}
-  ],
-  "requirements_add": ["package1", "package2"]
-}
-
-Only include files you modify or create. For new features: create routers/<name>.py, add tests, update main.py.
-
-WEBHOOK FORWARDING (when story involves "forward to webhook" or "POST to webhook"):
-- Read WEBHOOK_URL from os.environ. Only POST if WEBHOOK_URL is set.
-- After fetching data (e.g. price), POST JSON payload to WEBHOOK_URL using httpx: {"symbol": str, "price": float, "timestamp": str (ISO format)}.
-- Use httpx.post(webhook_url, json=payload, timeout=10.0). Catch and log errors; do not fail the fetch if webhook fails.
-- In tests: mock httpx.post (e.g. monkeypatch.setattr) so no real HTTP. Assert the mock was called with expected payload.
-- Add httpx to requirements_add if not present.
-
-
-GENERIC QUALITY CONTRACT (MANDATORY)
-
-1) Behavior mapping:
-For each changed endpoint/function, infer and document (internally) expected inputs, outputs, side effects, and error paths from the story AC. Implement and test only those behaviors.
-
-2) Test design:
-- API tests assert route contract (status, response schema/body).
-- Side effects are tested at unit level on the function that triggers them.
-- Do NOT assert side effects from read-only endpoints unless AC explicitly requires it.
-- Use `with TestClient(app) as client:` in tests; avoid module-global client creation.
-
-3) External dependencies:
-- Mock all external boundaries in tests (HTTP, SDKs, DBs, queues, schedulers, files).
-- No real network calls in tests.
-- Assert both positive and negative side-effect expectations.
-
-4) Patch safety:
-- Preserve existing behavior unless story says otherwise.
-- Additive changes preferred (new routers/services/tests).
-- If behavior changes, update tests to match explicit AC.
-
-5) Dependency hygiene:
-- Add all imported runtime dependencies to requirements.
-- Keep tests deterministic and time-safe.
-
-6) Retry triage on pytest failure:
-Classify failures as: test expectation mismatch, implementation bug, dependency/config gap, import/path issue, flaky timing.
-Fix the smallest correct layer first:
-- test mismatch -> fix tests
-- behavior mismatch -> fix implementation
-- dependency gap -> fix requirements/imports
-
-7) Pre-output self-check:
-- Every AC is covered by at least one test.
-- No undocumented side-effect assertions.
-- No real external calls in tests.
-- Output only modified/created files and requirements_add.
-
-
-"""
-
-
-def _load_scope() -> dict:
-    if not SCOPE_FILE.exists():
-        return {"implemented_stories": [], "last_updated": None}
-    with open(SCOPE_FILE) as f:
-        return json.load(f)
-
-
-def _save_scope(scope: dict) -> None:
-    SCOPE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    scope["last_updated"] = datetime.utcnow().isoformat()
-    with open(SCOPE_FILE, "w") as f:
-        json.dump(scope, f, indent=2)
-
-
-def _read_existing_codebase() -> str:
-    """Read all .py files in backend for context."""
-    if not BACKEND.exists():
-        return "(empty workspace)"
-    lines = []
-    for p in sorted(BACKEND.rglob("*.py")):
-        if "__pycache__" in str(p):
-            continue
-        rel = p.relative_to(BACKEND)
-        lines.append(f"=== {rel} ===\n{p.read_text(encoding='utf-8')}\n")
-    if (BACKEND / "requirements.txt").exists():
-        lines.append(f"=== requirements.txt ===\n{(BACKEND / 'requirements.txt').read_text()}\n")
-    return "\n".join(lines) if lines else "(empty workspace)"
-
-
-RETRY_PROMPT = """pytest failed. Fix the code based on this error and output the corrected JSON (files + requirements_add). Do not repeat the error; just fix and output."""
-JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY valid JSON matching this schema:
-{
-  "files": [{"path": "relative/path", "content": "full file content"}],
-  "requirements_add": ["package"]
-}
-No markdown fences. No commentary."""
-
+MODEL_NAME = os.getenv("BACKEND_AGENT_MODEL", "gpt-4o-mini")
 MAX_RETRIES = 2
 MAX_JSON_PARSE_RETRIES = 2
 
+PLANNER_PROMPT = """You are an implementation planner for a Python FastAPI backend.
+Return JSON only with this schema:
+{
+  "summary": "short implementation summary",
+  "files_to_touch": ["main.py", "routers/example.py"],
+  "acceptance_map": [{"criterion": "AC", "implementation": "how it will be satisfied"}],
+  "validation_steps": ["pytest target or smoke check"],
+  "risk_checks": ["specific regressions to avoid"]
+}
 
-def _store_raw_response(raw: str) -> None:
+Rules:
+- Plan additive changes that preserve existing behavior.
+- Touch the fewest files possible.
+- If the story changes a read-only endpoint, do not invent side effects.
+- If tests are needed, map every acceptance criterion to at least one verification path.
+"""
+
+CODER_PROMPT = """You are a Backend Developer. Extend the existing FastAPI codebase using the provided plan.
+
+Hard constraints:
+- Preserve existing behavior unless the story explicitly changes it.
+- Use focused, additive patches only.
+- Add all imported runtime dependencies to requirements.txt.
+- Mock all external boundaries in tests. No real network calls.
+- Use lifespan context managers, not deprecated FastAPI event hooks.
+- Do not use `@router.exception_handler(...)` on `APIRouter`; handle route errors with local `try/except` or register exception handlers on the `FastAPI` app.
+- Output JSON only:
+{
+  "files": [{"path": "relative/path/from/backend", "content": "full file content"}],
+  "requirements_add": ["package1"]
+}
+"""
+
+JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY valid JSON matching the requested schema. No markdown fences. No commentary."""
+PYTEST_RETRY_PROMPT = """pytest failed. First classify whether the issue is in tests, implementation, or dependencies. Fix the smallest correct layer and return corrected JSON only."""
+
+
+def _store_raw_response(prefix: str, raw: str) -> None:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    out = DEBUG_DIR / f"llm_raw_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
+    out = DEBUG_DIR / f"{prefix}_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
     out.write_text(raw, encoding="utf-8")
 
 
-def _call_llm(client: OpenAI, messages: list[dict]) -> dict:
-    parse_errors: list[str] = []
-    local_messages = list(messages)
-
+def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str) -> dict:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    errors: list[str] = []
     for _ in range(MAX_JSON_PARSE_RETRIES + 1):
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=local_messages,
+            model=MODEL_NAME,
+            messages=messages,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
         content = (response.choices[0].message.content or "").strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
         try:
             return json.loads(content)
-        except json.JSONDecodeError as e:
-            parse_errors.append(str(e))
-            _store_raw_response(content)
-            local_messages.append({"role": "assistant", "content": content})
-            local_messages.append({"role": "user", "content": JSON_RETRY_PROMPT})
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
+            _store_raw_response("backend_json", content)
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": JSON_RETRY_PROMPT})
+    raise ValueError("Invalid JSON from backend model after retries: " + " | ".join(errors))
 
-    raise ValueError("Invalid JSON from model after retries: " + " | ".join(parse_errors))
+
+def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+    siblings = [
+        {
+            "id": item.id,
+            "title": item.title,
+            "ownership": item.ownership,
+            "acceptance_criteria": item.acceptance_criteria,
+        }
+        for item in sibling_stories
+        if item.id != story.id
+    ]
+    return json.dumps(
+        {
+            "requirement": requirement_text,
+            "story": story.model_dump(),
+            "sibling_stories": siblings,
+            "implemented_scope": load_json(SCOPE_FILE, {"implemented_stories": []}),
+        },
+        indent=2,
+    )
 
 
-def _apply_changes(data: dict) -> None:
-    for f in data.get("files", []):
-        path = BACKEND / f["path"]
+def _focused_backend_context(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+    story_text = " ".join(
+        [
+            requirement_text,
+            story.title,
+            story.description,
+            *story.acceptance_criteria,
+            *story.implementation_notes,
+            *story.test_focus,
+        ]
+    )
+    files = select_relevant_files(BACKEND, story_text, {".py"}, max_files=10)
+    return render_context(BACKEND, files)
+
+
+def _plan_backend_change(client: OpenAI, story: Story, requirement_text: str, sibling_stories: list[Story]) -> dict:
+    prompt = f"""Planning payload:
+{_story_bundle(story, requirement_text, sibling_stories)}
+
+Focused backend context:
+{_focused_backend_context(story, requirement_text, sibling_stories)}
+"""
+    return _call_llm_json(client, prompt, PLANNER_PROMPT)
+
+
+def _generate_backend_patch(
+    client: OpenAI,
+    story: Story,
+    requirement_text: str,
+    sibling_stories: list[Story],
+    plan: dict,
+    error_output: str = "",
+) -> dict:
+    retry_block = f"\nPrevious validation failure:\n{error_output}\n" if error_output else ""
+    prompt = f"""Implementation payload:
+{_story_bundle(story, requirement_text, sibling_stories)}
+
+Approved plan:
+{json.dumps(plan, indent=2)}
+
+Focused backend context:
+{_focused_backend_context(story, requirement_text, sibling_stories)}
+{retry_block}
+Return only the files you modify/create and any new requirements.
+"""
+    if error_output:
+        return _call_llm_json(client, prompt + "\n" + PYTEST_RETRY_PROMPT, CODER_PROMPT)
+    return _call_llm_json(client, prompt, CODER_PROMPT)
+
+
+def _apply_changes(data: dict, root: Path) -> None:
+    for file_change in data.get("files", []):
+        path = root / file_change["path"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f["content"], encoding="utf-8")
-    req_path = BACKEND / "requirements.txt"
+        path.write_text(file_change["content"], encoding="utf-8")
+
+    req_path = root / "requirements.txt"
     if not req_path.exists():
-        req_path.write_text("fastapi\nuvicorn\npytest\nhttpx\n")
-    for pkg in data.get("requirements_add", []):
-        text = req_path.read_text()
-        if pkg not in text:
-            req_path.write_text(text.rstrip() + f"\n{pkg}\n")
+        req_path.write_text("fastapi\nuvicorn\npytest\nhttpx\n", encoding="utf-8")
+    existing = req_path.read_text(encoding="utf-8")
+    for package in data.get("requirements_add", []):
+        if package not in existing:
+            existing = existing.rstrip() + f"\n{package}\n"
+    req_path.write_text(existing, encoding="utf-8")
 
 
-def _run_pytest() -> tuple[bool, str]:
+def _run_pytest(root: Path) -> tuple[bool, str]:
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
-        cwd=BACKEND,
+        cwd=root,
         capture_output=True,
         check=False,
     )
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", str(BACKEND)],
+        [sys.executable, "-m", "pytest", "-v", str(root)],
+        cwd=root,
         capture_output=True,
         text=True,
-        cwd=BACKEND,
+        check=False,
     )
     if result.returncode != 0:
         return False, f"{result.stderr}\n{result.stdout}"
     return True, ""
 
 
-def implement_backend(story: Story) -> tuple[bool, str]:
-    """Implement story by patching existing codebase. Retries up to MAX_RETRIES on pytest failure."""
+def implement_backend(
+    story: Story,
+    requirement_text: str = "",
+    sibling_stories: list[Story] | None = None,
+) -> tuple[bool, str]:
+    """Plan, patch, validate in scratch, and promote only on success."""
     client = OpenAI()
-    scope = _load_scope()
-    existing = _read_existing_codebase()
-
-    user_content = f"""Existing codebase:
-{existing}
-
----
-NEW STORY to implement:
-Title: {story.title}
-Description: {story.description}
-Acceptance criteria: {story.acceptance_criteria}
-
-Extend the codebase. Preserve existing functionality. Output JSON with "files" and "requirements_add"."""
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    siblings = sibling_stories or []
+    last_error = ""
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            data = _call_llm(client, messages)
-        except ValueError as e:
-            if attempt < MAX_RETRIES:
-                messages.append({"role": "user", "content": f"{JSON_RETRY_PROMPT}\n\nError: {e}"})
-                continue
-            return False, f"LLM JSON parsing failed after {MAX_RETRIES + 1} attempts: {e}"
+            plan = _plan_backend_change(client, story, requirement_text, siblings)
+            patch = _generate_backend_patch(client, story, requirement_text, siblings, plan, last_error)
+        except ValueError as exc:
+            return False, str(exc)
 
-        _apply_changes(data)
-
-        ok, error_output = _run_pytest()
+        scratch = create_scratch_copy(BACKEND, "backend_attempt")
+        _apply_changes(patch, scratch)
+        ok, error_output = _run_pytest(scratch)
         if ok:
-            implemented = scope.get("implemented_stories", [])
-            if story.id not in implemented:
-                implemented.append(story.id)
-                scope["implemented_stories"] = implemented
-            _save_scope(scope)
-            retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
-            return True, f"Patched {BACKEND}. pytest passed{retry_note}. Scope: {scope['implemented_stories']}"
-
-        if attempt < MAX_RETRIES:
-            messages.append({"role": "assistant", "content": json.dumps(data)})
-            messages.append(
+            promote_scratch_copy(scratch, BACKEND)
+            scope = update_scope(
+                SCOPE_FILE,
                 {
-                    "role": "user",
-                    "content": f"{RETRY_PROMPT}\n\npytest output:\n{error_output}",
-                }
+                    "id": story.id,
+                    "title": story.title,
+                    "owner": "backend",
+                    "summary": plan.get("summary", story.description),
+                    "applied_at": datetime.utcnow().isoformat(),
+                },
             )
-        else:
-            return False, f"pytest failed after {MAX_RETRIES + 1} attempts:\n{error_output}"
+            save_json(SCOPE_FILE, scope)
+            retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
+            return True, f"Patched {BACKEND}. pytest passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
+        last_error = error_output
+
+    return False, f"pytest failed after {MAX_RETRIES + 1} attempts:\n{last_error}"
