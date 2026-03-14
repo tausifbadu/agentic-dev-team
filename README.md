@@ -28,3 +28,7 @@ python main.py "Build a simple frontend page and backend endpoint"
 - `workspace/backend`: backend app generated and patched over time
 - `workspace/scope.json`: tracks implemented story IDs
 - `workspace/debug`: raw model outputs when JSON parsing fails
+
+## MFA Run Guide
+
+- See `RUN_MFA_APP.md` for step-by-step instructions to run and test the MFA app locally.
