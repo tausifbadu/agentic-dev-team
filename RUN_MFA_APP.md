@@ -61,8 +61,12 @@ Expected behavior:
 
 - The page shows a symbol input or selection.
 - Submitting a valid symbol loads MFA data from the backend.
-- The UI renders daily, monthly, and yearly sections.
-- The chart renders from backend `chart_data`.
+- The UI renders daily, monthly, and yearly MFA sections.
+- The MFA chart renders percent change by timeframe from backend `chart_data`.
+- A separate Momentum Structural Analysis (MSA) section appears below with:
+  - Cross-timeframe comparison bar chart (structure score or rate of change).
+  - Per-timeframe MSA cards with trend regime, structure state, momentum confirmation.
+  - Per-timeframe line charts showing close, support, resistance, and EMAs.
 - Loading, error, and no-data states appear when appropriate.
 
 ## 5. Backend API Test
@@ -82,15 +86,16 @@ Invoke-RestMethod "http://127.0.0.1:8000/mfa?symbol=@@@.NS"
 
 Expected results:
 
-- Valid symbol returns MFA JSON.
+- Valid symbol returns MFA JSON with `analyses`, `chart_data`, `momentum_structures`, `structure_chart_data`, and per-timeframe `*_structure_series`.
 - Missing `.NS` suffix returns a `400` error.
 - Invalid symbol format returns a controlled error response.
 
 ## 6. Run Automated Backend Tests
 
-From the project root:
+From the project root (with venv activated):
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 python -m pytest workspace/backend/tests
 ```
 
