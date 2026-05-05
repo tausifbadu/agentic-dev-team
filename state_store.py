@@ -198,6 +198,15 @@ def init_db() -> None:
     except Exception:
         pass
 
+    for alter in (
+        "ALTER TABLE storypacks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'",
+        "ALTER TABLE enhancements ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'",
+    ):
+        try:
+            conn.execute(alter)
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -237,13 +246,27 @@ def list_requirements() -> list[dict]:
 
 # --- StoryPacks ---
 
-def save_storypack(pack_id: str, requirement_id: str, requirement_text: str,
-                   stories: list[dict], status: str = "pending_review",
-                   created_at: str | None = None) -> None:
+def save_storypack(
+    pack_id: str,
+    requirement_id: str,
+    requirement_text: str,
+    stories: list[dict],
+    status: str = "pending_review",
+    created_at: str | None = None,
+    project_id: str = "default",
+) -> None:
     conn = _get_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO storypacks (id, requirement_id, requirement_text, stories_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (pack_id, requirement_id, requirement_text, json.dumps(stories, default=str), status, created_at or _now_iso()),
+        "INSERT OR REPLACE INTO storypacks (id, requirement_id, requirement_text, stories_json, status, created_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            pack_id,
+            requirement_id,
+            requirement_text,
+            json.dumps(stories, default=str),
+            status,
+            created_at or _now_iso(),
+            project_id or "default",
+        ),
     )
     conn.commit()
     conn.close()
@@ -497,12 +520,26 @@ def get_failure_patterns(limit: int = 20) -> list[dict]:
 
 # --- Enhancements ---
 
-def save_enhancement(enhance_id: str, agent_type: str, description: str,
-                     context: str = "", story_json: str = "{}") -> None:
+def save_enhancement(
+    enhance_id: str,
+    agent_type: str,
+    description: str,
+    context: str = "",
+    story_json: str = "{}",
+    project_id: str = "default",
+) -> None:
     conn = _get_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO enhancements (id, agent_type, description, context, story_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-        (enhance_id, agent_type, description, context, story_json, _now_iso()),
+        "INSERT OR REPLACE INTO enhancements (id, agent_type, description, context, story_json, status, created_at, project_id) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
+        (
+            enhance_id,
+            agent_type,
+            description,
+            context,
+            story_json,
+            _now_iso(),
+            project_id or "default",
+        ),
     )
     conn.commit()
     conn.close()
@@ -759,6 +796,7 @@ def save(path: Path, data: dict) -> None:
             stories_raw,
             data.get("status", "pending_review"),
             data.get("created_at"),
+            project_id=data.get("project_id", "default"),
         )
 
 

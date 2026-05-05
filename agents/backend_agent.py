@@ -106,27 +106,31 @@ JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY va
 PYTEST_RETRY_PROMPT = """pytest failed. First classify whether the issue is in tests, implementation, or dependencies. Fix the smallest correct layer and return corrected JSON only."""
 
 
-def _store_raw_response(prefix: str, raw: str) -> None:
-    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    out = DEBUG_DIR / f"{prefix}_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
+def _store_raw_response(prefix: str, raw: str, *, debug_dir: Path) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out = debug_dir / f"{prefix}_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
     out.write_text(raw, encoding="utf-8")
 
 
-def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str) -> dict:
+def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str, debug_dir: Path) -> dict:
     from agents.llm_client import call_llm_json
+
+    def on_raw(raw: str) -> None:
+        _store_raw_response("backend_json", raw, debug_dir=debug_dir)
+
     print(f"[backend_agent] LLM call: {len(system_prompt) + len(prompt)} chars input, model={MODEL_NAME}", flush=True)
     return call_llm_json(
         client, MODEL_NAME, system_prompt, prompt,
         max_retries=MAX_JSON_PARSE_RETRIES,
         retry_prompt=JSON_RETRY_PROMPT,
-        on_raw_response=lambda raw: _store_raw_response("backend_json", raw),
+        on_raw_response=on_raw,
     )
 
 
 MAX_REQ_CHARS = 2000
 
 
-def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Story], scope_file: Path) -> str:
     truncated = requirement_text[:MAX_REQ_CHARS] + ("..." if len(requirement_text) > MAX_REQ_CHARS else "")
     siblings = [
         {
@@ -145,13 +149,13 @@ def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Sto
             "requirement": truncated,
             "story": story.model_dump(),
             "sibling_stories": siblings,
-            "implemented_scope": load_json(SCOPE_FILE, {"implemented_stories": []}),
+            "implemented_scope": load_json(scope_file, {"implemented_stories": []}),
         },
         indent=2,
     )
 
 
-def _focused_backend_context(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+def _focused_backend_context(story: Story, requirement_text: str, sibling_stories: list[Story], backend_dir: Path) -> str:
     story_text = " ".join(
         [
             requirement_text,
@@ -162,8 +166,8 @@ def _focused_backend_context(story: Story, requirement_text: str, sibling_storie
             *story.test_focus,
         ]
     )
-    files = select_relevant_files(BACKEND, story_text, {".py"}, max_files=10)
-    return render_context(BACKEND, files)
+    files = select_relevant_files(backend_dir, story_text, {".py"}, max_files=10)
+    return render_context(backend_dir, files)
 
 
 def _plan_backend_change(
@@ -171,16 +175,19 @@ def _plan_backend_change(
     story: Story,
     requirement_text: str,
     sibling_stories: list[Story],
-    fix_context: str = "",
+    fix_context: str,
+    backend_dir: Path,
+    scope_file: Path,
+    debug_dir: Path,
 ) -> dict:
     print(f"[backend_agent] Building plan prompt for: {story.title}", flush=True)
-    bundle = _story_bundle(story, requirement_text, sibling_stories)
+    bundle = _story_bundle(story, requirement_text, sibling_stories, scope_file)
     print(f"[backend_agent] Story bundle: {len(bundle)} chars", flush=True)
-    ctx = _focused_backend_context(story, requirement_text, sibling_stories)
+    ctx = _focused_backend_context(story, requirement_text, sibling_stories, backend_dir)
     print(f"[backend_agent] Backend context: {len(ctx)} chars", flush=True)
     fix_block = f"\n\nPM Fix / Replan Guidance (incorporate into your plan):\n{fix_context}\n" if fix_context else ""
-    file_tree = workspace_file_tree(BACKEND, {".py"})
-    export_map = workspace_export_map(BACKEND, {".py"})
+    file_tree = workspace_file_tree(backend_dir, {".py"})
+    export_map = workspace_export_map(backend_dir, {".py"})
     export_section = f"\n\nEXPORT MAP (each file's public functions/classes — you MUST NOT remove any of these):\n{export_map}" if export_map else ""
     prompt = f"""Planning payload:
 {bundle}
@@ -192,7 +199,7 @@ ALL files currently in the backend workspace (only import from these):
 {file_tree}
 {export_section}
 {fix_block}"""
-    return _call_llm_json(client, prompt, PLANNER_PROMPT)
+    return _call_llm_json(client, prompt, PLANNER_PROMPT, debug_dir)
 
 
 def _generate_backend_patch(
@@ -201,20 +208,23 @@ def _generate_backend_patch(
     requirement_text: str,
     sibling_stories: list[Story],
     plan: dict,
-    error_output: str = "",
+    error_output: str,
+    backend_dir: Path,
+    scope_file: Path,
+    debug_dir: Path,
 ) -> dict:
     retry_block = f"\nPrevious validation failure:\n{error_output}\n" if error_output else ""
-    file_tree = workspace_file_tree(BACKEND, {".py"})
-    export_map = workspace_export_map(BACKEND, {".py"})
+    file_tree = workspace_file_tree(backend_dir, {".py"})
+    export_map = workspace_export_map(backend_dir, {".py"})
     export_section = f"\n\nEXPORT MAP (each file's public functions/classes — PRESERVE ALL of these when rewriting files):\n{export_map}" if export_map else ""
     prompt = f"""Implementation payload:
-{_story_bundle(story, requirement_text, sibling_stories)}
+{_story_bundle(story, requirement_text, sibling_stories, scope_file)}
 
 Approved plan:
 {json.dumps(plan, indent=2)}
 
 Focused backend context:
-{_focused_backend_context(story, requirement_text, sibling_stories)}
+{_focused_backend_context(story, requirement_text, sibling_stories, backend_dir)}
 
 ALL files currently in the backend workspace (only import from these — do NOT invent modules):
 {file_tree}
@@ -224,8 +234,8 @@ Return only the files you modify/create and any new requirements.
 When rewriting an existing file, you MUST include ALL its existing public functions/classes (see export map above) in your output — even if your story does not modify them. Dropping them will break other files that import them.
 """
     if error_output:
-        return _call_llm_json(client, prompt + "\n" + PYTEST_RETRY_PROMPT, CODER_PROMPT)
-    return _call_llm_json(client, prompt, CODER_PROMPT)
+        return _call_llm_json(client, prompt + "\n" + PYTEST_RETRY_PROMPT, CODER_PROMPT, debug_dir)
+    return _call_llm_json(client, prompt, CODER_PROMPT, debug_dir)
 
 
 _FILE_SEP_RE = re.compile(r"^={3,}\s*(.+?)\s*={3,}\s*$", re.MULTILINE)
@@ -297,8 +307,14 @@ def implement_backend(
     on_progress: ProgressCallback = None,
     fix_context: str = "",
     replan: bool = False,
+    workspace_root: Path | None = None,
 ) -> tuple[bool, str]:
     """Plan, patch, validate in scratch, and promote only on success."""
+    ws = (workspace_root or WORKSPACE).resolve()
+    backend_dir = ws / "backend"
+    scope_file = ws / "scope.json"
+    debug_dir = ws / "debug"
+
     client = OpenAI(timeout=90)
     siblings = sibling_stories or []
     last_error = fix_context
@@ -314,26 +330,30 @@ def implement_backend(
         try:
             plan = _plan_backend_change(
                 client, story, requirement_text, siblings,
-                fix_context=fix_context if (replan or attempt == 0) else "",
+                fix_context if (replan or attempt == 0) else "",
+                backend_dir, scope_file, debug_dir,
             )
             emit("Plan ready", json.dumps(plan, indent=2))
 
             emit("Generating code...")
-            patch = _generate_backend_patch(client, story, requirement_text, siblings, plan, last_error)
+            patch = _generate_backend_patch(
+                client, story, requirement_text, siblings, plan, last_error,
+                backend_dir, scope_file, debug_dir,
+            )
             file_paths = [f.get("path", "?") for f in patch.get("files", [])]
             emit(f"Code generated: {', '.join(file_paths)}", _format_files_detail(patch))
         except ValueError as exc:
             return False, str(exc)
 
         emit("Validating with pytest...")
-        scratch = create_scratch_copy(BACKEND, "backend_attempt")
+        scratch = create_scratch_copy(backend_dir, "backend_attempt")
         _apply_changes(patch, scratch)
         ok, error_output = _run_pytest(scratch)
         if ok:
             emit("Validation passed")
-            promote_scratch_copy(scratch, BACKEND)
+            promote_scratch_copy(scratch, backend_dir)
             scope = update_scope(
-                SCOPE_FILE,
+                scope_file,
                 {
                     "id": story.id,
                     "title": story.title,
@@ -342,9 +362,9 @@ def implement_backend(
                     "applied_at": datetime.utcnow().isoformat(),
                 },
             )
-            save_json(SCOPE_FILE, scope)
+            save_json(scope_file, scope)
             retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
-            return True, f"Patched {BACKEND}. pytest passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
+            return True, f"Patched {backend_dir}. pytest passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
         emit("Validation failed, retrying...", error_output)
         last_error = error_output
 

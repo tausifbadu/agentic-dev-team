@@ -88,6 +88,18 @@ def _mark_validation(ctx: ToolContext, tool_name: str, ok: bool) -> None:
         ctx.metadata["dirty_since_validation"] = False
 
 
+def _http_check_max_invocations_per_story() -> int:
+    """0 means no cap. Set HTTP_CHECK_MAX_PER_STORY to a positive integer to limit real runs."""
+    raw = os.getenv("HTTP_CHECK_MAX_PER_STORY", "").strip()
+    if not raw:
+        return 0
+    try:
+        n = int(raw, 10)
+        return n if n > 0 else 0
+    except ValueError:
+        return 0
+
+
 def _scratch(ctx: ToolContext) -> Path:
     if ctx.scratch_dir is None:
         raise ToolError("This tool requires a scratch_dir on the agent context")
@@ -457,9 +469,40 @@ def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     headers = args.get("headers") or {}
     timeout = int(args.get("timeout", 10))
 
+    last_val = ctx.metadata.get("last_validation")
+    dirty = bool(ctx.metadata.get("dirty_since_validation"))
+    if (
+        last_val
+        and last_val.get("tool") == "http_check"
+        and last_val.get("ok")
+        and not dirty
+    ):
+        return ToolResult(
+            ok=True,
+            content=(
+                "Skipped redundant http_check: a passing check is already recorded and "
+                "there were no file edits since. Use publish_contract / finish_story, "
+                "or edit files then call http_check again."
+            ),
+            metadata={"skipped_redundant": True},
+        )
+
+    cap = _http_check_max_invocations_per_story()
+    used = int(ctx.metadata.get("http_check_invocations", 0))
+    if cap > 0 and used >= cap:
+        return ToolResult(
+            ok=False,
+            content=(
+                f"http_check: reached max invocations for this story ({cap}, "
+                f"set via HTTP_CHECK_MAX_PER_STORY). Use run_python to debug, or reduce noise."
+            ),
+        )
+    ctx.metadata["http_check_invocations"] = used + 1
+
     cwd = _scratch(ctx)
     main_py = cwd / "main.py"
     if not main_py.exists():
+        _mark_validation(ctx, "http_check", False)
         return ToolResult(ok=False, content="No main.py found — cannot http_check.")
 
     _run_pip_install(cwd)
@@ -477,6 +520,7 @@ def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         )
         if not _wait_for_port(port, timeout=20):
             stderr = proc.stderr.read() if proc.stderr else ""
+            _mark_validation(ctx, "http_check", False)
             return ToolResult(
                 ok=False,
                 content=f"uvicorn failed to bind port {port} within 20s\nStderr:\n{_trim(stderr)}",
@@ -504,14 +548,24 @@ def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             except Exception:
                 body_text = ""
         except Exception as exc:  # noqa: BLE001
+            _mark_validation(ctx, "http_check", False)
             return ToolResult(ok=False, content=f"HTTP request failed: {exc}")
 
-        ok_status = status is not None and 200 <= status < 400
+        # 2xx only — redirects (3xx) must not count as success or agents get false
+        # greens from slash redirects (e.g. POST /api/foo → 307) without a real body.
+        ok_status = status is not None and 200 <= status < 300
+        _mark_validation(ctx, "http_check", ok_status)
+        hint = ""
+        if status is not None and 300 <= status < 400:
+            hint = (
+                "\n(note: 3xx redirects do not count as ok=True — use the canonical path "
+                "and json_body for POST, or expect 2xx.)"
+            )
         return ToolResult(
             ok=ok_status,
             content=(
                 f"{method} {path} → {status}\n"
-                f"--- body ({len(body_text)} chars) ---\n{body_text}"
+                f"--- body ({len(body_text)} chars) ---\n{body_text}{hint}"
             ),
             metadata={"status": status, "method": method, "path": path},
         )
@@ -792,8 +846,8 @@ def register_exec_tools(registry: ToolRegistry) -> None:
         name="http_check",
         description=(
             "Boot uvicorn briefly and send one HTTP request against the backend in scratch. "
-            "Returns the response status and body. Use to verify endpoints behave correctly "
-            "end-to-end (not just that the server starts)."
+            "Returns the response status and body. **ok=True** only for HTTP 2xx (not 3xx "
+            "redirects). Use to verify endpoints; for POST include json_body. "
         ),
         parameters_schema={
             "type": "object",

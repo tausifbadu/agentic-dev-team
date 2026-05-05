@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import state_store
+from workspace_paths import resolve_workspace_dir
 from schemas import Story
 from agents.backend_agent import implement_backend
 from agents.frontend_agent import implement_frontend
@@ -37,10 +38,16 @@ MAX_PM_RETRIES = 3
 MAX_TEST_FIX_CYCLES = 3
 MAX_SMOKE_FIX_CYCLES = 3
 
-WORKSPACE = PROJECT_ROOT / "workspace"
-BACKEND_DIR = WORKSPACE / "backend"
-FRONTEND_DIR = WORKSPACE / "frontend"
-CONTRACTS_DIR = WORKSPACE / "contracts"
+
+def _env_truthy(name: str) -> bool:
+    v = os.getenv(name, "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def _workspace_for_pack(pack: dict) -> Path:
+    """Resolve filesystem root for a storypack (or fix request pack) from ``project_id``."""
+    return resolve_workspace_dir(pack.get("project_id"))
+
 
 execution_state: dict = {
     "running": False,
@@ -115,6 +122,42 @@ def _comm(from_agent: str, to_agent: str, event_type: str,
 
 # ── Dependency Sort ──
 
+def expand_story_selection(
+    all_stories: list[Story],
+    selected_ids: list[str] | None,
+) -> tuple[list[Story], list[str]]:
+    """Resolve which stories to run.
+
+    If ``selected_ids`` is None or empty, returns ``all_stories`` unchanged.
+
+    Otherwise returns the selected stories plus every transitive prerequisite
+    (``Story.dependencies`` edges within the pack). Order matches ``all_stories``.
+    The second return value lists ids that were auto-included as dependencies.
+    """
+    if not selected_ids:
+        return (all_stories, [])
+    by_id = {s.id: s for s in all_stories}
+    missing = [x for x in selected_ids if x not in by_id]
+    if missing:
+        raise ValueError(f"Unknown story id(s): {missing}")
+
+    closure: set[str] = set(selected_ids)
+    queue: list[str] = list(selected_ids)
+    while queue:
+        sid = queue.pop(0)
+        if sid not in by_id:
+            continue
+        for dep in by_id[sid].dependencies:
+            if dep in by_id and dep not in closure:
+                closure.add(dep)
+                queue.append(dep)
+
+    selected_set = set(selected_ids)
+    auto_added = sorted(closure - selected_set)
+    ordered = [s for s in all_stories if s.id in closure]
+    return (ordered, auto_added)
+
+
 def _topo_sort_within_phase(stories: list[Story]) -> list[Story]:
     """Topological sort respecting story.dependencies within a phase."""
     id_set = {s.id for s in stories}
@@ -144,10 +187,12 @@ def _topo_sort_within_phase(stories: list[Story]) -> list[Story]:
 
 # ── Contract Publish ──
 
-def _publish_contract():
-    contract = extract_api_contract(BACKEND_DIR)
-    CONTRACTS_DIR.mkdir(parents=True, exist_ok=True)
-    save_json(CONTRACTS_DIR / "api_contract.json", contract)
+def _publish_contract(workspace_root: Path) -> dict:
+    backend_dir = workspace_root / "backend"
+    contracts_dir = workspace_root / "contracts"
+    contract = extract_api_contract(backend_dir)
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+    save_json(contracts_dir / "api_contract.json", contract)
     route_count = len(contract.get("routes", []))
     model_count = len(contract.get("models", []))
     _log(None, "orchestrator",
@@ -168,6 +213,8 @@ def _heal_story(
     requirement_text: str,
     all_stories: list[Story],
     initial_error: str,
+    *,
+    workspace_root: Path | None = None,
 ) -> tuple[bool, str]:
     """PM-guided retry loop for a single story (up to MAX_PM_RETRIES)."""
     cumulative_errors = initial_error
@@ -206,11 +253,15 @@ def _heal_story(
             _log(story.id, "pm", f"PM analysis error: {exc}", level="error")
 
         _log(story.id, agent_type, f"[heal cycle {attempt}/{MAX_PM_RETRIES}] Retrying: {story.title}")
+        fn_kwargs: dict = {}
+        if workspace_root is not None:
+            fn_kwargs["workspace_root"] = workspace_root
         ok, msg = implement_fn(
             story, requirement_text, all_stories,
             on_progress=progress,
             fix_context=fix_instructions,
             replan=use_replan,
+            **fn_kwargs,
         )
 
         if ok:
@@ -277,9 +328,10 @@ def _scan_for_errors(output: str, patterns: list[str]) -> list[str]:
     return found
 
 
-def _smoke_test_backend() -> tuple[bool, str]:
+def _smoke_test_backend(workspace_root: Path) -> tuple[bool, str]:
     """Start uvicorn on the workspace backend and check for errors."""
-    if not (BACKEND_DIR / "main.py").exists():
+    backend_dir = workspace_root / "backend"
+    if not (backend_dir / "main.py").exists():
         return True, "No backend main.py found — skipping backend smoke test."
 
     port = _find_free_port()
@@ -287,17 +339,17 @@ def _smoke_test_backend() -> tuple[bool, str]:
     proc = None
 
     try:
-        reqs = BACKEND_DIR / "requirements.txt"
+        reqs = backend_dir / "requirements.txt"
         if reqs.exists():
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-q", "-r", str(reqs)],
-                cwd=BACKEND_DIR, capture_output=True, check=False, timeout=60,
+                cwd=backend_dir, capture_output=True, check=False, timeout=60,
             )
 
         proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "main:app",
              "--host", "127.0.0.1", "--port", str(port)],
-            cwd=BACKEND_DIR,
+            cwd=backend_dir,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
         )
@@ -353,9 +405,10 @@ def _smoke_test_backend() -> tuple[bool, str]:
             proc.wait()
 
 
-def _smoke_test_frontend() -> tuple[bool, str]:
+def _smoke_test_frontend(workspace_root: Path) -> tuple[bool, str]:
     """Start vite dev server on the workspace frontend and check for errors."""
-    if not (FRONTEND_DIR / "package.json").exists():
+    frontend_dir = workspace_root / "frontend"
+    if not (frontend_dir / "package.json").exists():
         return True, "No frontend package.json found — skipping frontend smoke test."
 
     port = _find_free_port()
@@ -365,12 +418,12 @@ def _smoke_test_frontend() -> tuple[bool, str]:
     try:
         subprocess.run(
             ["npm", "install", "--prefer-offline", "--no-audit", "--no-fund"],
-            cwd=FRONTEND_DIR, capture_output=True, check=False, timeout=120,
+            cwd=frontend_dir, capture_output=True, check=False, timeout=120,
         )
 
         proc = subprocess.Popen(
             ["npx", "vite", "--port", str(port), "--strictPort"],
-            cwd=FRONTEND_DIR,
+            cwd=frontend_dir,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
         )
@@ -420,17 +473,17 @@ def _smoke_test_frontend() -> tuple[bool, str]:
             proc.wait()
 
 
-def _run_smoke_test() -> tuple[bool, str]:
+def _run_smoke_test(workspace_root: Path) -> tuple[bool, str]:
     """Run backend and frontend smoke tests, return combined result."""
     results: list[str] = []
     all_ok = True
 
-    be_ok, be_msg = _smoke_test_backend()
+    be_ok, be_msg = _smoke_test_backend(workspace_root)
     results.append(f"--- Backend Smoke Test ---\n{be_msg}")
     if not be_ok:
         all_ok = False
 
-    fe_ok, fe_msg = _smoke_test_frontend()
+    fe_ok, fe_msg = _smoke_test_frontend(workspace_root)
     results.append(f"--- Frontend Smoke Test ---\n{fe_msg}")
     if not fe_ok:
         all_ok = False
@@ -474,17 +527,35 @@ def _try_rescope(story: Story, cumulative_errors: str, requirement_text: str,
 
 # ── Main Pipeline ──
 
-def run_agents_background(pack_id: str) -> None:
+def run_agents_background(
+    pack_id: str,
+    *,
+    fast_track: bool | None = None,
+    story_ids: list[str] | None = None,
+) -> None:
     """Run all agents for an approved storypack.
 
     Dispatches to the new agentic supervisor (default) unless USE_LEGACY_PIPELINE=1.
+
+    fast_track: when True, skip test phase and smoke (supervisor only). If None,
+    reads AGENTIC_FAST_TRACK from the environment.
+
+    story_ids: when set and non-empty, only these stories (plus transitive
+    prerequisites per ``Story.dependencies``) are executed. Agents still receive
+    the full pack as context via ``Supervisor(all_stories=...)``.
     """
+    ft = fast_track if fast_track is not None else _env_truthy("AGENTIC_FAST_TRACK")
     if USE_AGENTIC_SUPERVISOR:
-        return _run_agents_via_supervisor(pack_id)
-    return _run_agents_legacy(pack_id)
+        return _run_agents_via_supervisor(pack_id, fast_track=ft, story_ids=story_ids)
+    return _run_agents_legacy(pack_id, story_ids=story_ids)
 
 
-def _run_agents_via_supervisor(pack_id: str) -> None:
+def _run_agents_via_supervisor(
+    pack_id: str,
+    *,
+    fast_track: bool = False,
+    story_ids: list[str] | None = None,
+) -> None:
     """New agentic runtime: instantiate Supervisor + agents and let them coordinate."""
     global execution_state, _current_run_id, _current_pack_id
 
@@ -502,8 +573,14 @@ def _run_agents_via_supervisor(pack_id: str) -> None:
     _current_run_id = run_id
     _current_pack_id = pack_id
 
-    stories = [Story(**s) for s in pack["stories"]]
+    full_stories = [Story(**s) for s in pack["stories"]]
+    try:
+        stories, auto_included = expand_story_selection(full_stories, story_ids)
+    except ValueError as exc:
+        _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
+        return
     requirement_text = pack["requirement_text"]
+    workspace_dir = _workspace_for_pack(pack)
 
     execution_state = {
         "running": True,
@@ -520,8 +597,24 @@ def _run_agents_via_supervisor(pack_id: str) -> None:
     }
 
     state_store.update_storypack_status(pack_id, "in_progress")
-    _log(None, "orchestrator",
-         f"Starting AGENTIC run {run_id} for pack {pack_id}: {len(stories)} stories")
+    subset_note = ""
+    if story_ids and len(stories) < len(full_stories):
+        subset_note = f" (subset: {len(stories)}/{len(full_stories)} stories"
+        if auto_included:
+            subset_note += f", auto-included deps: {', '.join(auto_included)}"
+        subset_note += ")"
+    elif story_ids and auto_included:
+        subset_note = (
+            f" (subset: {len(stories)} stories; auto-included deps: {', '.join(auto_included)})"
+        )
+
+    _log(
+        None,
+        "orchestrator",
+        f"Starting AGENTIC run {run_id} for pack {pack_id}: {len(stories)} stories"
+        + (" (fast_track: skip tests + smoke)" if fast_track else "")
+        + subset_note,
+    )
 
     try:
         from agents.supervisor import Supervisor, SupervisorConfig
@@ -536,11 +629,12 @@ def _run_agents_via_supervisor(pack_id: str) -> None:
             storypack_id=pack_id,
             requirement_text=requirement_text,
             stories=stories,
-            workspace_dir=WORKSPACE,
+            all_stories=full_stories,
+            workspace_dir=workspace_dir,
             config=SupervisorConfig(
                 max_pm_heal_attempts=MAX_PM_RETRIES,
-                run_tests=True,
-                run_smoke=True,
+                run_tests=not fast_track,
+                run_smoke=not fast_track,
             ),
             on_progress=_on_progress,
         )
@@ -593,7 +687,7 @@ def _run_agents_via_supervisor(pack_id: str) -> None:
         globals()["_active_supervisor"] = None
 
 
-def _run_agents_legacy(pack_id: str) -> None:
+def _run_agents_legacy(pack_id: str, *, story_ids: list[str] | None = None) -> None:
     """Legacy script-driven orchestration (preserved for safety / regression)."""
     global execution_state, _current_run_id, _current_pack_id
 
@@ -609,8 +703,14 @@ def _run_agents_legacy(pack_id: str) -> None:
     _current_run_id = run_id
     _current_pack_id = pack_id
 
-    stories = [Story(**s) for s in pack["stories"]]
+    full_stories = [Story(**s) for s in pack["stories"]]
+    try:
+        stories, auto_included = expand_story_selection(full_stories, story_ids)
+    except ValueError as exc:
+        _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
+        return
     requirement_text = pack["requirement_text"]
+    workspace_root = _workspace_for_pack(pack)
 
     execution_state = {
         "running": True,
@@ -631,13 +731,24 @@ def _run_agents_legacy(pack_id: str) -> None:
     backend_stories = _topo_sort_within_phase([s for s in stories if s.ownership == "backend"])
     frontend_stories = _topo_sort_within_phase([s for s in stories if s.ownership == "frontend"])
 
+    subset_note = ""
+    if story_ids and auto_included:
+        subset_note = f" | auto-included deps: {', '.join(auto_included)}"
+    elif story_ids and len(stories) < len(full_stories):
+        subset_note = f" | subset {len(stories)}/{len(full_stories)} stories"
+
     _log(None, "orchestrator",
          f"Starting LEGACY execution run {run_id} for pack {pack_id}: "
-         f"{len(backend_stories)} backend, {len(frontend_stories)} frontend | "
+         f"{len(backend_stories)} backend, {len(frontend_stories)} frontend"
+         f"{subset_note} | "
          f"MAX_PM_RETRIES={MAX_PM_RETRIES}, MAX_TEST_FIX_CYCLES={MAX_TEST_FIX_CYCLES}")
 
     try:
-        _run_pipeline(pack_id, stories, requirement_text, backend_stories, frontend_stories)
+        _run_pipeline(
+            pack_id, stories, requirement_text, backend_stories, frontend_stories,
+            all_stories=full_stories,
+            workspace_root=workspace_root,
+        )
     except Exception as exc:
         _log(None, "orchestrator", f"Pipeline crashed with unhandled exception: {exc}", level="error")
         state_store.update_storypack_status(pack_id, "failed")
@@ -651,12 +762,16 @@ def _run_agents_legacy(pack_id: str) -> None:
 
 def _run_pipeline(
     pack_id: str,
-    stories: list,
+    run_stories: list,
     requirement_text: str,
     backend_stories: list,
     frontend_stories: list,
+    *,
+    all_stories: list | None = None,
+    workspace_root: Path,
 ) -> None:
     """Inner pipeline logic — exceptions propagate to run_agents_background."""
+    context_stories = all_stories if all_stories is not None else run_stories
     halted = False
 
     # ── Backend Phase ──
@@ -669,7 +784,9 @@ def _run_pipeline(
               summary=f"Assigned '{story.title}' to backend")
 
         progress = _make_progress_cb(story.id, "backend")
-        ok, msg = implement_backend(story, requirement_text, stories, on_progress=progress)
+        ok, msg = implement_backend(
+            story, requirement_text, context_stories, on_progress=progress, workspace_root=workspace_root,
+        )
         _comm("backend", "orchestrator", "build_result", story.id,
               payload={"success": ok, "message": msg[:500]},
               summary=f"{'Success' if ok else 'Failed'}: {story.title}")
@@ -678,15 +795,21 @@ def _run_pipeline(
             execution_state["completed_stories"].append(story.id)
             _log(story.id, "backend", f"Completed: {msg}")
         else:
-            ok, msg = _heal_story(story, "backend", implement_backend, requirement_text, stories, msg)
+            ok, msg = _heal_story(
+                story, "backend", implement_backend, requirement_text, context_stories, msg,
+                workspace_root=workspace_root,
+            )
             if ok:
                 execution_state["completed_stories"].append(story.id)
             else:
-                decision, simplified = _try_rescope(story, msg, requirement_text, stories)
+                decision, simplified = _try_rescope(story, msg, requirement_text, context_stories)
                 if decision == "simplify" and simplified:
                     _log(story.id, "orchestrator", f"Re-trying with simplified story: {simplified.title}")
                     progress = _make_progress_cb(story.id, "backend")
-                    ok2, msg2 = implement_backend(simplified, requirement_text, stories, on_progress=progress)
+                    ok2, msg2 = implement_backend(
+                        simplified, requirement_text, context_stories, on_progress=progress,
+                        workspace_root=workspace_root,
+                    )
                     if ok2:
                         execution_state["completed_stories"].append(story.id)
                         _log(story.id, "backend", f"Simplified story succeeded: {msg2}")
@@ -706,7 +829,7 @@ def _run_pipeline(
 
     # ── Publish API Contract ──
     if not halted and execution_state["completed_stories"]:
-        _publish_contract()
+        _publish_contract(workspace_root)
 
     # ── Frontend Phase ──
     if not halted:
@@ -719,7 +842,9 @@ def _run_pipeline(
                   summary=f"Assigned '{story.title}' to frontend")
 
             progress = _make_progress_cb(story.id, "frontend")
-            ok, msg = implement_frontend(story, requirement_text, stories, on_progress=progress)
+            ok, msg = implement_frontend(
+                story, requirement_text, context_stories, on_progress=progress, workspace_root=workspace_root,
+            )
             _comm("frontend", "orchestrator", "build_result", story.id,
                   payload={"success": ok, "message": msg[:500]},
                   summary=f"{'Success' if ok else 'Failed'}: {story.title}")
@@ -728,15 +853,21 @@ def _run_pipeline(
                 execution_state["completed_stories"].append(story.id)
                 _log(story.id, "frontend", f"Completed: {msg}")
             else:
-                ok, msg = _heal_story(story, "frontend", implement_frontend, requirement_text, stories, msg)
+                ok, msg = _heal_story(
+                    story, "frontend", implement_frontend, requirement_text, context_stories, msg,
+                    workspace_root=workspace_root,
+                )
                 if ok:
                     execution_state["completed_stories"].append(story.id)
                 else:
-                    decision, simplified = _try_rescope(story, msg, requirement_text, stories)
+                    decision, simplified = _try_rescope(story, msg, requirement_text, context_stories)
                     if decision == "simplify" and simplified:
                         _log(story.id, "orchestrator", f"Re-trying with simplified story: {simplified.title}")
                         progress = _make_progress_cb(story.id, "frontend")
-                        ok2, msg2 = implement_frontend(simplified, requirement_text, stories, on_progress=progress)
+                        ok2, msg2 = implement_frontend(
+                            simplified, requirement_text, context_stories, on_progress=progress,
+                            workspace_root=workspace_root,
+                        )
                         if ok2:
                             execution_state["completed_stories"].append(story.id)
                             _log(story.id, "frontend", f"Simplified story succeeded: {msg2}")
@@ -763,7 +894,9 @@ def _run_pipeline(
         _log(None, "testing", "Starting test generation and execution")
 
         progress = _make_progress_cb(None, "testing")
-        ok, msg = implement_tests(stories, requirement_text, on_progress=progress)
+        ok, msg = implement_tests(
+            context_stories, requirement_text, on_progress=progress, workspace_root=workspace_root,
+        )
 
         if ok:
             _log(None, "testing", f"Tests passed: {msg}")
@@ -780,7 +913,7 @@ def _run_pipeline(
                       summary=f"Test-fix cycle {cycle}")
 
                 try:
-                    triage = triage_test_failure(msg, stories, requirement_text)
+                    triage = triage_test_failure(msg, context_stories, requirement_text)
                     target_agent = triage.get("target_agent", "testing")
                     root_cause = triage.get("root_cause", "unknown")
                     fix_instructions = triage.get("fix_instructions", "")
@@ -800,8 +933,8 @@ def _run_pipeline(
 
                 if target_agent in ("backend", "frontend"):
                     target_story = next(
-                        (s for s in stories if s.id == responsible_id),
-                        next((s for s in stories if s.ownership == target_agent), None),
+                        (s for s in context_stories if s.id == responsible_id),
+                        next((s for s in context_stories if s.ownership == target_agent), None),
                     )
                     if target_story:
                         impl_fn = implement_backend if target_agent == "backend" else implement_frontend
@@ -814,18 +947,19 @@ def _run_pipeline(
 
                         fix_ok, fix_msg = _heal_story(
                             target_story, target_agent, impl_fn,
-                            requirement_text, stories, fix_context,
+                            requirement_text, context_stories, fix_context,
+                            workspace_root=workspace_root,
                         )
-                        if not fix_ok:
-                            _log(target_story.id, target_agent,
-                                 f"[test-fix {cycle}] Fix agent also failed", level="error")
                 else:
                     _log(None, "orchestrator", f"[test-fix {cycle}] PM says bug is in tests — re-generating")
 
                 _log(None, "testing", f"[test-fix {cycle}/{MAX_TEST_FIX_CYCLES}] Re-running tests")
                 execution_state["current_agent"] = "testing"
                 execution_state["current_story_id"] = None
-                ok, msg = implement_tests(stories, requirement_text, on_progress=progress, fix_context=fix_context)
+                ok, msg = implement_tests(
+                    context_stories, requirement_text, on_progress=progress, fix_context=fix_context,
+                    workspace_root=workspace_root,
+                )
                 state_store.save_test_result(pack_id, "all", ok, msg)
 
                 if ok:
@@ -850,7 +984,7 @@ def _run_pipeline(
         _comm("orchestrator", "orchestrator", "smoke_test_start",
               summary="Integration smoke test starting")
 
-        smoke_ok, smoke_msg = _run_smoke_test()
+        smoke_ok, smoke_msg = _run_smoke_test(workspace_root)
         _log(None, "orchestrator",
              f"Smoke test initial result: {'PASSED' if smoke_ok else 'FAILED'}",
              detail=smoke_msg)
@@ -875,7 +1009,7 @@ def _run_pipeline(
                 fix_instructions = ""
                 responsible_id = "unknown"
                 try:
-                    triage = triage_test_failure(smoke_msg, stories, requirement_text)
+                    triage = triage_test_failure(smoke_msg, context_stories, requirement_text)
                     target_agent = triage.get("target_agent", "backend")
                     root_cause = triage.get("root_cause", "unknown")
                     fix_instructions = triage.get("fix_instructions", "")
@@ -897,8 +1031,8 @@ def _run_pipeline(
 
                 if target_agent in ("backend", "frontend"):
                     target_story = next(
-                        (s for s in stories if s.id == responsible_id),
-                        next((s for s in stories if s.ownership == target_agent), None),
+                        (s for s in context_stories if s.id == responsible_id),
+                        next((s for s in context_stories if s.ownership == target_agent), None),
                     )
                     if target_story:
                         impl_fn = implement_backend if target_agent == "backend" else implement_frontend
@@ -912,7 +1046,8 @@ def _run_pipeline(
 
                         fix_ok, fix_msg = _heal_story(
                             target_story, target_agent, impl_fn,
-                            requirement_text, stories, fix_context,
+                            requirement_text, context_stories, fix_context,
+                            workspace_root=workspace_root,
                         )
                         if fix_ok:
                             _log(target_story.id, target_agent,
@@ -926,7 +1061,7 @@ def _run_pipeline(
                 execution_state["current_agent"] = "orchestrator"
                 execution_state["current_story_id"] = None
 
-                smoke_ok, smoke_msg = _run_smoke_test()
+                smoke_ok, smoke_msg = _run_smoke_test(workspace_root)
                 _log(None, "orchestrator",
                      f"[smoke-fix {smoke_cycle}] Smoke re-test: {'PASSED' if smoke_ok else 'FAILED'}",
                      detail=smoke_msg)
@@ -1010,6 +1145,7 @@ def run_fix_background(fix_id: str) -> None:
 
     agent_type = fix_req["agent_type"]
     requirement_text = pack["requirement_text"]
+    workspace_root = _workspace_for_pack(pack)
 
     fix_state = {
         "running": True,
@@ -1024,14 +1160,20 @@ def run_fix_background(fix_id: str) -> None:
 
     try:
         if agent_type == "backend":
-            ok, msg = implement_backend(target_story, requirement_text, stories,
-                                        on_progress=progress, fix_context=fix_context)
+            ok, msg = implement_backend(
+                target_story, requirement_text, stories,
+                on_progress=progress, fix_context=fix_context, workspace_root=workspace_root,
+            )
         elif agent_type == "frontend":
-            ok, msg = implement_frontend(target_story, requirement_text, stories,
-                                         on_progress=progress, fix_context=fix_context)
+            ok, msg = implement_frontend(
+                target_story, requirement_text, stories,
+                on_progress=progress, fix_context=fix_context, workspace_root=workspace_root,
+            )
         elif agent_type == "testing":
-            ok, msg = implement_tests(stories, requirement_text,
-                                      on_progress=progress, fix_context=fix_context)
+            ok, msg = implement_tests(
+                stories, requirement_text,
+                on_progress=progress, fix_context=fix_context, workspace_root=workspace_root,
+            )
         else:
             ok, msg = False, f"Unknown agent type: {agent_type}"
 
@@ -1065,13 +1207,13 @@ enhance_state: dict = {
 MAX_ENHANCE_RETRIES = 2
 
 
-def _build_enhancement_context(description: str, context: str) -> str:
+def _build_enhancement_context(description: str, context: str, workspace_root: Path) -> str:
     """Build the shared workspace context string for enhancement mode."""
     workspace_context = ""
-    scope_path = WORKSPACE / "scope.json"
+    scope_path = workspace_root / "scope.json"
     if scope_path.exists():
         workspace_context += f"\nExisting scope.json:\n{scope_path.read_text()[:2000]}"
-    contract_path = CONTRACTS_DIR / "api_contract.json"
+    contract_path = workspace_root / "contracts" / "api_contract.json"
     if contract_path.exists():
         workspace_context += f"\nExisting API contract:\n{contract_path.read_text()[:2000]}"
 
@@ -1093,12 +1235,16 @@ def _run_single_enhance_agent(
     enhancement_context: str,
     description: str,
     all_stories: list,
+    workspace_root: Path,
 ) -> tuple[bool, str]:
     """Implement one enhancement story with heal loop. Returns (ok, message)."""
     progress = _make_progress_cb(story.id, agent_type)
     impl_fn = implement_backend if agent_type == "backend" else implement_frontend
 
-    ok, msg = impl_fn(story, enhancement_context, all_stories, on_progress=progress)
+    ok, msg = impl_fn(
+        story, enhancement_context, all_stories, on_progress=progress,
+        workspace_root=workspace_root,
+    )
 
     if ok:
         _log(story.id, agent_type, f"Enhancement implemented: {msg}")
@@ -1122,6 +1268,7 @@ def _run_single_enhance_agent(
         ok2, msg2 = impl_fn(
             story, enhancement_context, all_stories,
             on_progress=progress, fix_context=fix_instructions,
+            workspace_root=workspace_root,
         )
 
         if ok2:
@@ -1159,12 +1306,14 @@ def run_enhancement_background(enhance_id: str) -> None:
     state_store.update_enhancement_status(enhance_id, "running")
     _log(None, "orchestrator", f"Enhancement {enhance_id} started — PM generating story for {agent_type}")
 
+    workspace_root = resolve_workspace_dir(enh.get("project_id"))
+
     try:
-        enhancement_context = _build_enhancement_context(description, context)
+        enhancement_context = _build_enhancement_context(description, context, workspace_root)
 
         _log(None, "orchestrator", f"Creating workspace backup before enhancement {enhance_id}")
         try:
-            bp = backup_workspace(WORKSPACE, label=enhance_id)
+            bp = backup_workspace(workspace_root, label=enhance_id)
             state_store.update_enhancement_status(enhance_id, "running", backup_path=bp)
             _log(None, "orchestrator", f"Workspace backed up to {bp}")
         except Exception as bk_exc:
@@ -1191,21 +1340,25 @@ def run_enhancement_background(enhance_id: str) -> None:
                 enhance_state["phase"] = "backend"
                 enhance_state["agent_type"] = "backend"
                 _log(story.id, "backend", f"Starting backend enhancement: {story.title}")
-                ok, msg = _run_single_enhance_agent(story, "backend", enhancement_context, description, stories)
+                ok, msg = _run_single_enhance_agent(
+                    story, "backend", enhancement_context, description, stories, workspace_root,
+                )
                 results.append(f"backend ({story.title}): {'OK' if ok else 'FAILED'}")
                 if not ok:
                     all_ok = False
                     break
 
             if all_ok:
-                _publish_contract()
+                _publish_contract(workspace_root)
 
             if all_ok:
                 for story in fe_stories:
                     enhance_state["phase"] = "frontend"
                     enhance_state["agent_type"] = "frontend"
                     _log(story.id, "frontend", f"Starting frontend enhancement: {story.title}")
-                    ok, msg = _run_single_enhance_agent(story, "frontend", enhancement_context, description, stories)
+                    ok, msg = _run_single_enhance_agent(
+                        story, "frontend", enhancement_context, description, stories, workspace_root,
+                    )
                     results.append(f"frontend ({story.title}): {'OK' if ok else 'FAILED'}")
                     if not ok:
                         all_ok = False
@@ -1228,7 +1381,9 @@ def run_enhancement_background(enhance_id: str) -> None:
                  detail=json.dumps(story_data, indent=2))
 
             enhance_state["phase"] = "implementing"
-            ok, msg = _run_single_enhance_agent(story, agent_type, enhancement_context, description, [story])
+            ok, msg = _run_single_enhance_agent(
+                story, agent_type, enhancement_context, description, [story], workspace_root,
+            )
 
             if ok:
                 state_store.update_enhancement_status(enhance_id, "success", msg)

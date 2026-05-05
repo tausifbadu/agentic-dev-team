@@ -85,55 +85,61 @@ JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY va
 TEST_RETRY_PROMPT = """Tests failed. Classify whether the issue is in the test code, test setup, or missing dependencies. Fix the smallest correct layer and return corrected JSON only."""
 
 
-def _store_raw_response(raw: str) -> None:
-    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+def _store_raw_response(raw: str, *, debug_dir: Path) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    out = DEBUG_DIR / f"test_raw_{ts}_{uuid.uuid4().hex[:8]}.txt"
+    out = debug_dir / f"test_raw_{ts}_{uuid.uuid4().hex[:8]}.txt"
     out.write_text(raw, encoding="utf-8")
 
 
-def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str) -> dict:
+def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str, debug_dir: Path) -> dict:
     from agents.llm_client import call_llm_json
+
+    def on_raw(raw: str) -> None:
+        _store_raw_response(raw, debug_dir=debug_dir)
+
     return call_llm_json(
         client, MODEL_NAME, system_prompt, prompt,
         max_retries=MAX_JSON_PARSE_RETRIES,
         retry_prompt=JSON_RETRY_PROMPT,
-        on_raw_response=_store_raw_response,
+        on_raw_response=on_raw,
     )
 
 
-def _gather_workspace_context() -> str:
+def _gather_workspace_context(backend_dir: Path, frontend_dir: Path) -> str:
     """Read both backend and frontend source for comprehensive test generation."""
     sections: list[str] = []
 
-    if BACKEND.exists():
-        be_files = select_relevant_files(BACKEND, "api endpoint test route model", {".py"}, max_files=12)
+    if backend_dir.exists():
+        be_files = select_relevant_files(backend_dir, "api endpoint test route model", {".py"}, max_files=12)
         if be_files:
             sections.append("=== BACKEND CODE ===")
-            sections.append(render_context(BACKEND, be_files))
+            sections.append(render_context(backend_dir, be_files))
 
-    if FRONTEND.exists():
+    if frontend_dir.exists():
         fe_files = select_relevant_files(
-            FRONTEND, "component page app fetch api", {".js", ".jsx", ".ts", ".tsx", ".css", ".html"}, max_files=10
+            frontend_dir, "component page app fetch api", {".js", ".jsx", ".ts", ".tsx", ".css", ".html"}, max_files=10
         )
         if fe_files:
             sections.append("=== FRONTEND CODE ===")
-            sections.append(render_context(FRONTEND, fe_files))
+            sections.append(render_context(frontend_dir, fe_files))
 
     return "\n\n".join(sections) if sections else "(empty workspace)"
 
 
-CONTRACTS_DIR = WORKSPACE / "contracts"
-
-
-def _load_api_contract() -> dict | None:
-    path = CONTRACTS_DIR / "api_contract.json"
+def _load_api_contract(contracts_dir: Path) -> dict | None:
+    path = contracts_dir / "api_contract.json"
     if path.exists():
         return load_json(path, {})
     return None
 
 
-def _stories_context(all_stories: list[Story], requirement_text: str) -> str:
+def _stories_context(
+    all_stories: list[Story],
+    requirement_text: str,
+    scope_file: Path,
+    contracts_dir: Path,
+) -> str:
     story_data = [
         {
             "id": s.id,
@@ -148,22 +154,32 @@ def _stories_context(all_stories: list[Story], requirement_text: str) -> str:
     bundle: dict = {
         "requirement": requirement_text,
         "stories": story_data,
-        "implemented_scope": load_json(SCOPE_FILE, {"implemented_stories": []}),
+        "implemented_scope": load_json(scope_file, {"implemented_stories": []}),
     }
-    contract = _load_api_contract()
+    contract = _load_api_contract(contracts_dir)
     if contract:
         bundle["api_contract"] = contract
     return json.dumps(bundle, indent=2)
 
 
-def _plan_tests(client: OpenAI, all_stories: list[Story], requirement_text: str) -> dict:
+def _plan_tests(
+    client: OpenAI,
+    all_stories: list[Story],
+    requirement_text: str,
+    root: Path,
+) -> dict:
+    backend_dir = root / "backend"
+    frontend_dir = root / "frontend"
+    scope_file = root / "scope.json"
+    contracts_dir = root / "contracts"
+    debug_dir = root / "debug"
     prompt = f"""Test planning payload:
-{_stories_context(all_stories, requirement_text)}
+{_stories_context(all_stories, requirement_text, scope_file, contracts_dir)}
 
 Workspace code:
-{_gather_workspace_context()}
+{_gather_workspace_context(backend_dir, frontend_dir)}
 """
-    return _call_llm_json(client, prompt, PLANNER_PROMPT)
+    return _call_llm_json(client, prompt, PLANNER_PROMPT, debug_dir)
 
 
 def _generate_test_patch(
@@ -171,23 +187,29 @@ def _generate_test_patch(
     all_stories: list[Story],
     requirement_text: str,
     plan: dict,
-    error_output: str = "",
+    error_output: str,
+    root: Path,
 ) -> dict:
+    backend_dir = root / "backend"
+    frontend_dir = root / "frontend"
+    scope_file = root / "scope.json"
+    contracts_dir = root / "contracts"
+    debug_dir = root / "debug"
     retry_block = f"\nPrevious test failure:\n{error_output}\n" if error_output else ""
     prompt = f"""Test implementation payload:
-{_stories_context(all_stories, requirement_text)}
+{_stories_context(all_stories, requirement_text, scope_file, contracts_dir)}
 
 Approved test plan:
 {json.dumps(plan, indent=2)}
 
 Workspace code:
-{_gather_workspace_context()}
+{_gather_workspace_context(backend_dir, frontend_dir)}
 {retry_block}
 Generate test files for api/, ui/, and integration/ subdirectories.
 """
     if error_output:
-        return _call_llm_json(client, prompt + "\n" + TEST_RETRY_PROMPT, CODER_PROMPT)
-    return _call_llm_json(client, prompt, CODER_PROMPT)
+        return _call_llm_json(client, prompt + "\n" + TEST_RETRY_PROMPT, CODER_PROMPT, debug_dir)
+    return _call_llm_json(client, prompt, CODER_PROMPT, debug_dir)
 
 
 def _apply_changes(data: dict, root: Path) -> None:
@@ -293,8 +315,14 @@ def implement_tests(
     requirement_text: str = "",
     on_progress: ProgressCallback = None,
     fix_context: str = "",
+    workspace_root: Path | None = None,
 ) -> tuple[bool, str]:
     """Plan, generate, validate tests in scratch, promote on success."""
+    root = (workspace_root or WORKSPACE).resolve()
+    tests_dir = root / "tests"
+    backend_dir = root / "backend"
+    scope_file = root / "scope.json"
+
     client = OpenAI(timeout=90)
     last_error = fix_context
     emit = on_progress or (lambda msg, detail=None: None)
@@ -305,31 +333,31 @@ def implement_tests(
     for attempt in range(MAX_RETRIES + 1):
         emit(f"Planning test suite (attempt {attempt + 1})...")
         try:
-            plan = _plan_tests(client, all_stories, requirement_text)
+            plan = _plan_tests(client, all_stories, requirement_text, root)
             emit("Test plan ready", json.dumps(plan, indent=2))
 
             emit("Generating test files...")
-            patch = _generate_test_patch(client, all_stories, requirement_text, plan, last_error)
+            patch = _generate_test_patch(client, all_stories, requirement_text, plan, last_error, root)
             file_paths = [f.get("path", "?") for f in patch.get("files", [])]
             emit(f"Tests generated: {', '.join(file_paths)}", _format_files_detail(patch))
         except ValueError as exc:
             return False, str(exc)
 
         emit("Running test suites...")
-        scratch = create_scratch_copy(TESTS_DIR, "tests_attempt")
+        scratch = create_scratch_copy(tests_dir, "tests_attempt")
         _apply_changes(patch, scratch)
 
-        if BACKEND.exists():
+        if backend_dir.exists():
             backend_in_scratch = scratch.parent / "backend"
             if not backend_in_scratch.exists():
-                shutil.copytree(BACKEND, backend_in_scratch)
+                shutil.copytree(backend_dir, backend_in_scratch)
 
         ok, output = _run_all_tests(scratch)
         if ok:
             emit("All tests passed", output)
-            promote_scratch_copy(scratch, TESTS_DIR)
+            promote_scratch_copy(scratch, tests_dir)
             scope = update_scope(
-                SCOPE_FILE,
+                scope_file,
                 {
                     "id": "test_suite",
                     "title": "Test Suite",
@@ -338,9 +366,9 @@ def implement_tests(
                     "applied_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
-            save_json(SCOPE_FILE, scope)
+            save_json(scope_file, scope)
             retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
-            return True, f"Tests generated at {TESTS_DIR}{retry_note}.\n{output}"
+            return True, f"Tests generated at {tests_dir}{retry_note}.\n{output}"
         emit("Tests failed, retrying...", output)
         last_error = output
 

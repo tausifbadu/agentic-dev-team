@@ -1,32 +1,35 @@
 """Workspace file browser API routes."""
 
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-WORKSPACE = PROJECT_ROOT / "workspace"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from workspace_paths import resolve_workspace_dir
 
 router = APIRouter(tags=["workspace"])
 
 IGNORED = {"node_modules", "__pycache__", ".pytest_cache", "dist", "build", ".git", ".venv"}
 
 
-def _tree(root: Path, prefix: str = "") -> list[dict]:
-    """Build a file tree from a directory."""
+def _tree(root: Path, base: Path) -> list[dict]:
+    """Build a file tree from a directory; paths are relative to ``base``."""
     if not root.exists():
         return []
     entries = []
     for item in sorted(root.iterdir()):
         if item.name in IGNORED or item.name.startswith("."):
             continue
-        rel = str(item.relative_to(WORKSPACE))
+        rel = str(item.relative_to(base))
         if item.is_dir():
             entries.append({
                 "name": item.name,
                 "path": rel,
                 "type": "directory",
-                "children": _tree(item, rel),
+                "children": _tree(item, base),
             })
         else:
             entries.append({
@@ -39,14 +42,16 @@ def _tree(root: Path, prefix: str = "") -> list[dict]:
 
 
 @router.get("/workspace/files")
-def list_workspace_files():
-    return _tree(WORKSPACE)
+def list_workspace_files(project_id: str | None = None):
+    base = resolve_workspace_dir(project_id)
+    return _tree(base, base)
 
 
 @router.get("/workspace/file")
-def read_workspace_file(path: str):
-    full = (WORKSPACE / path).resolve()
-    if not str(full).startswith(str(WORKSPACE.resolve())):
+def read_workspace_file(path: str, project_id: str | None = None):
+    ws = resolve_workspace_dir(project_id)
+    full = (ws / path).resolve()
+    if not str(full).startswith(str(ws.resolve())):
         raise HTTPException(status_code=403, detail="Path traversal not allowed")
     if not full.exists() or not full.is_file():
         raise HTTPException(status_code=404, detail="File not found")

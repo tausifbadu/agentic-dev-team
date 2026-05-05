@@ -25,6 +25,7 @@ from dashboard.backend.routes.fixes import router as fixes_router
 from dashboard.backend.routes.comms import router as comms_router
 from dashboard.backend.routes.enhancements import router as enhancements_router
 from dashboard.backend.routes.events import router as events_router
+from dashboard.backend.routes.projects import router as projects_router
 import state_store
 
 
@@ -57,6 +58,7 @@ app.include_router(fixes_router, prefix="/api")
 app.include_router(comms_router, prefix="/api")
 app.include_router(enhancements_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
+app.include_router(projects_router, prefix="/api")
 
 
 @app.get("/api/health")

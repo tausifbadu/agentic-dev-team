@@ -12,6 +12,7 @@ true cross-agent dialog (not just orchestrator narration).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -85,9 +86,9 @@ def _ask_pm_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             content=(
                 f"PM has already advised on this story {count} times. "
                 "PM will not answer further code-level questions. "
-                "Either: (a) FIX THE CODE yourself by running validators "
-                "(run_pytest / http_check / run_npm_build) and iterating on the "
-                "actual error message, or (b) call finish_story(success=false) "
+                "Either: (a) FIX THE CODE yourself by running your agent's validators "
+                "(backend: `http_check`; frontend: `run_npm_build`; test: `run_pytest`) "
+                "and iterating on the actual error message, or (b) call finish_story(success=false) "
                 "with a clear summary of what is blocking you and the exact "
                 "error you cannot resolve. Do NOT call ask_pm again for this story."
             ),
@@ -121,8 +122,8 @@ def _ask_pm_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     elif count + 1 == ASK_PM_MAX_PER_STORY - 1:
         suffix = (
             "\n\n[anti-loop notice] One more ask_pm call is allowed for this story. "
-            "After that you must rely on validators (run_pytest / http_check / run_npm_build) "
-            "and your own debugging — do not bring code-level errors to PM."
+            "After that you must rely on your role's validators (backend: http_check; "
+            "frontend: run_npm_build; test: run_pytest) — do not bring code-level errors to PM."
         )
     return ToolResult(ok=True, content=(answer or "(empty answer)") + suffix)
 
@@ -207,8 +208,18 @@ def _publish_contract_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     )
 
 
-_BACKEND_REQUIRED_VALIDATORS = {"run_pytest", "http_check"}
+_BACKEND_REQUIRED_VALIDATORS = {"http_check"}
 _FRONTEND_REQUIRED_VALIDATORS = {"run_npm_build"}
+
+
+def _backend_dod_http_check_enabled() -> bool:
+    """Backend Definition-of-Done requires a passing ``http_check`` unless disabled.
+
+    Env ``BACKEND_DOD_HTTP_CHECK`` (default ``1``): set to ``0``, ``false``, ``no``,
+    or ``off`` to allow ``finish_story(success=true)`` without ``http_check``.
+    """
+    v = os.getenv("BACKEND_DOD_HTTP_CHECK", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 def _finish_story_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -218,8 +229,9 @@ def _finish_story_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     recent passing **strong** validation and has not edited any files since.
 
     A "strong" validation differs by agent:
-      - backend: ``run_pytest`` or ``http_check`` (smoke_uvicorn alone is NOT
-        sufficient — it only proves the server boots, not that endpoints work).
+      - backend: ``http_check`` (unless ``BACKEND_DOD_HTTP_CHECK`` is disabled — see
+        ``_backend_dod_http_check_enabled``). ``http_check`` counts success only on
+        HTTP **2xx**, not 3xx redirects.
       - frontend: ``run_npm_build``.
       - test: any passing validation, or none if the agent only authored tests.
     Agents that genuinely cannot proceed must still call ``finish_story`` but with
@@ -236,8 +248,12 @@ def _finish_story_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         dirty = bool(ctx.metadata.get("dirty_since_validation"))
 
         if ctx.agent_id == "backend":
-            required = _BACKEND_REQUIRED_VALIDATORS
-            required_label = "run_pytest or http_check"
+            if _backend_dod_http_check_enabled():
+                required = _BACKEND_REQUIRED_VALIDATORS
+                required_label = "http_check"
+            else:
+                required = set()
+                required_label = ""
         elif ctx.agent_id == "frontend":
             required = _FRONTEND_REQUIRED_VALIDATORS
             required_label = "run_npm_build"
@@ -262,10 +278,9 @@ def _finish_story_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                     ok=False,
                     content=(
                         f"DoD gate: the most recent passing validation was '{last_tool}', but "
-                        f"this story requires {required_label}. "
-                        f"smoke_uvicorn alone proves only that the server boots; it does NOT "
-                        f"prove the endpoints behave correctly. "
-                        f"Run {required_label} and ensure it passes before calling finish_story."
+                        f"this story requires a successful {required_label} (HTTP probe). "
+                        f"Run {required_label} on a real route and ensure it returns 2xx before "
+                        f"calling finish_story."
                     ),
                 )
             if dirty:

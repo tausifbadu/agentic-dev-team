@@ -13,7 +13,8 @@ agent calls the `finish_story` tool.
 import json
 import re
 from typing import Any, Callable, Optional
-from openai import OpenAI
+
+from openai import BadRequestError, OpenAI
 
 RESPONSES_MODEL_PATTERNS = ("codex",)
 LEGACY_COMPLETIONS_MODEL_PATTERNS = ("davinci", "babbage", "cushman")
@@ -36,6 +37,31 @@ def is_completions_model(model_name: str) -> bool:
 
 def is_responses_model(model_name: str) -> bool:
     return _model_api(model_name) == "responses"
+
+
+def _chat_completions_create(
+    client: OpenAI,
+    *,
+    model: str,
+    max_tokens: int,
+    **kwargs: Any,
+):
+    """Call ``chat.completions.create``. Newer OpenAI models reject ``max_tokens`` and
+    require ``max_completion_tokens`` instead — retry on that error.
+    """
+    try:
+        return client.chat.completions.create(
+            model=model, max_tokens=max_tokens, **kwargs
+        )
+    except BadRequestError as exc:
+        err = str(exc).lower()
+        if "max_completion_tokens" in err or (
+            "max_tokens" in err and "unsupported" in err
+        ):
+            return client.chat.completions.create(
+                model=model, max_completion_tokens=max_tokens, **kwargs
+            )
+        raise
 
 
 def _extract_json(text: str) -> str:
@@ -82,14 +108,15 @@ def call_llm_text(
         )
         return (response.choices[0].text or "").strip()
 
-    response = client.chat.completions.create(
+    response = _chat_completions_create(
+        client,
         model=model,
+        max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         temperature=temperature,
-        max_tokens=max_tokens,
     )
     return (response.choices[0].message.content or "").strip()
 
@@ -134,12 +161,13 @@ def _call_chat_json(
     ]
     errors: list[str] = []
     for _ in range(max_retries + 1):
-        response = client.chat.completions.create(
+        response = _chat_completions_create(
+            client,
             model=model,
+            max_tokens=max_tokens,
             messages=messages,
             temperature=temperature,
             response_format={"type": "json_object"},
-            max_tokens=max_tokens,
         )
         content = (response.choices[0].message.content or "").strip()
         try:
@@ -302,13 +330,14 @@ def call_llm_with_tools(
             nudge_final_emitted = True
 
         try:
-            response = client.chat.completions.create(
+            response = _chat_completions_create(
+                client,
                 model=_chat_fallback_model(model),
+                max_tokens=max_tokens,
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
                 temperature=temperature,
-                max_tokens=max_tokens,
             )
         except Exception as exc:  # noqa: BLE001
             return ToolLoopResult(

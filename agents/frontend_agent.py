@@ -130,36 +130,43 @@ JSON_RETRY_PROMPT = """Your previous response was not valid JSON. Return ONLY va
 BUILD_RETRY_PROMPT = """Frontend checks failed. First determine whether the issue is in build config, runtime assumptions, or component code. Fix the smallest correct layer and return corrected JSON only."""
 
 
-def _store_raw_response(raw: str) -> None:
-    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    out = DEBUG_DIR / f"frontend_raw_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
+def _store_raw_response(raw: str, *, debug_dir: Path) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out = debug_dir / f"frontend_raw_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.txt"
     out.write_text(raw, encoding="utf-8")
 
 
-def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str) -> dict:
+def _call_llm_json(client: OpenAI, prompt: str, system_prompt: str, debug_dir: Path) -> dict:
     from agents.llm_client import call_llm_json
+
+    def on_raw(raw: str) -> None:
+        _store_raw_response(raw, debug_dir=debug_dir)
+
     return call_llm_json(
         client, MODEL_NAME, system_prompt, prompt,
         max_retries=MAX_JSON_PARSE_RETRIES,
         retry_prompt=JSON_RETRY_PROMPT,
-        on_raw_response=_store_raw_response,
+        on_raw_response=on_raw,
     )
 
 
 MAX_REQ_CHARS = 2000
 
 
-CONTRACTS_DIR = WORKSPACE / "contracts"
-
-
-def _load_api_contract() -> dict | None:
-    path = CONTRACTS_DIR / "api_contract.json"
+def _load_api_contract(contracts_dir: Path) -> dict | None:
+    path = contracts_dir / "api_contract.json"
     if path.exists():
         return load_json(path, {})
     return None
 
 
-def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Story]) -> str:
+def _story_bundle(
+    story: Story,
+    requirement_text: str,
+    sibling_stories: list[Story],
+    scope_file: Path,
+    contracts_dir: Path,
+) -> str:
     truncated = requirement_text[:MAX_REQ_CHARS] + ("..." if len(requirement_text) > MAX_REQ_CHARS else "")
     siblings = [
         {
@@ -177,15 +184,15 @@ def _story_bundle(story: Story, requirement_text: str, sibling_stories: list[Sto
         "requirement": truncated,
         "story": story.model_dump(),
         "sibling_stories": siblings,
-        "implemented_scope": load_json(SCOPE_FILE, {"implemented_stories": []}),
+        "implemented_scope": load_json(scope_file, {"implemented_stories": []}),
     }
-    contract = _load_api_contract()
+    contract = _load_api_contract(contracts_dir)
     if contract:
         bundle["api_contract"] = contract
     return json.dumps(bundle, indent=2)
 
 
-def _read_existing_frontend(story: Story, requirement_text: str) -> str:
+def _read_existing_frontend(story: Story, requirement_text: str, frontend_dir: Path) -> str:
     text = " ".join(
         [
             requirement_text,
@@ -196,8 +203,10 @@ def _read_existing_frontend(story: Story, requirement_text: str) -> str:
             *story.test_focus,
         ]
     )
-    files = select_relevant_files(FRONTEND, text, {".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".json"}, max_files=10)
-    return render_context(FRONTEND, files)
+    files = select_relevant_files(
+        frontend_dir, text, {".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".json"}, max_files=10,
+    )
+    return render_context(frontend_dir, files)
 
 
 def _plan_frontend_change(
@@ -205,24 +214,28 @@ def _plan_frontend_change(
     story: Story,
     requirement_text: str,
     sibling_stories: list[Story],
-    fix_context: str = "",
+    fix_context: str,
+    frontend_dir: Path,
+    scope_file: Path,
+    contracts_dir: Path,
+    debug_dir: Path,
 ) -> dict:
     fix_block = f"\n\nPM Fix / Replan Guidance (incorporate into your plan):\n{fix_context}\n" if fix_context else ""
     fe_suffixes = {".js", ".jsx", ".ts", ".tsx", ".css"}
-    file_tree = workspace_file_tree(FRONTEND, fe_suffixes)
-    export_map = workspace_export_map(FRONTEND, fe_suffixes)
+    file_tree = workspace_file_tree(frontend_dir, fe_suffixes)
+    export_map = workspace_export_map(frontend_dir, fe_suffixes)
     export_section = f"\n\nEXPORT MAP (each file's exported symbols — you MUST NOT remove any of these):\n{export_map}" if export_map else ""
     prompt = f"""Planning payload:
-{_story_bundle(story, requirement_text, sibling_stories)}
+{_story_bundle(story, requirement_text, sibling_stories, scope_file, contracts_dir)}
 
 Focused frontend context:
-{_read_existing_frontend(story, requirement_text)}
+{_read_existing_frontend(story, requirement_text, frontend_dir)}
 
 ALL files currently in the frontend workspace (only import from these):
 {file_tree}
 {export_section}
 {fix_block}"""
-    return _call_llm_json(client, prompt, PLANNER_PROMPT)
+    return _call_llm_json(client, prompt, PLANNER_PROMPT, debug_dir)
 
 
 def _generate_frontend_patch(
@@ -231,21 +244,25 @@ def _generate_frontend_patch(
     requirement_text: str,
     sibling_stories: list[Story],
     plan: dict,
-    error_output: str = "",
+    error_output: str,
+    frontend_dir: Path,
+    scope_file: Path,
+    contracts_dir: Path,
+    debug_dir: Path,
 ) -> dict:
     retry_block = f"\nPrevious validation failure:\n{error_output}\n" if error_output else ""
     fe_suffixes = {".js", ".jsx", ".ts", ".tsx", ".css"}
-    file_tree = workspace_file_tree(FRONTEND, fe_suffixes)
-    export_map = workspace_export_map(FRONTEND, fe_suffixes)
+    file_tree = workspace_file_tree(frontend_dir, fe_suffixes)
+    export_map = workspace_export_map(frontend_dir, fe_suffixes)
     export_section = f"\n\nEXPORT MAP (each file's exported symbols — PRESERVE ALL of these when rewriting files):\n{export_map}" if export_map else ""
     prompt = f"""Implementation payload:
-{_story_bundle(story, requirement_text, sibling_stories)}
+{_story_bundle(story, requirement_text, sibling_stories, scope_file, contracts_dir)}
 
 Approved plan:
 {json.dumps(plan, indent=2)}
 
 Focused frontend context:
-{_read_existing_frontend(story, requirement_text)}
+{_read_existing_frontend(story, requirement_text, frontend_dir)}
 
 ALL files currently in the frontend workspace (only import from these — do NOT invent modules):
 {file_tree}
@@ -255,8 +272,8 @@ Return only changed files and dependency additions.
 When rewriting an existing file, you MUST include ALL its existing exported symbols (see export map above) in your output — even if your story does not modify them. Dropping them will break other files that import them.
 """
     if error_output:
-        return _call_llm_json(client, prompt + "\n" + BUILD_RETRY_PROMPT, CODER_PROMPT)
-    return _call_llm_json(client, prompt, CODER_PROMPT)
+        return _call_llm_json(client, prompt + "\n" + BUILD_RETRY_PROMPT, CODER_PROMPT, debug_dir)
+    return _call_llm_json(client, prompt, CODER_PROMPT, debug_dir)
 
 
 _TAILWIND_CONFIG = """\
@@ -574,8 +591,15 @@ def implement_frontend(
     on_progress: ProgressCallback = None,
     fix_context: str = "",
     replan: bool = False,
+    workspace_root: Path | None = None,
 ) -> tuple[bool, str]:
     """Plan, patch, validate in scratch, and promote only on success."""
+    ws = (workspace_root or WORKSPACE).resolve()
+    frontend_dir = ws / "frontend"
+    scope_file = ws / "scope.json"
+    debug_dir = ws / "debug"
+    contracts_dir = ws / "contracts"
+
     client = OpenAI(timeout=180)
     siblings = sibling_stories or []
     last_error = fix_context
@@ -591,26 +615,30 @@ def implement_frontend(
         try:
             plan = _plan_frontend_change(
                 client, story, requirement_text, siblings,
-                fix_context=fix_context if (replan or attempt == 0) else "",
+                fix_context if (replan or attempt == 0) else "",
+                frontend_dir, scope_file, contracts_dir, debug_dir,
             )
             emit("Plan ready", json.dumps(plan, indent=2))
 
             emit("Generating code...")
-            patch = _generate_frontend_patch(client, story, requirement_text, siblings, plan, last_error)
+            patch = _generate_frontend_patch(
+                client, story, requirement_text, siblings, plan, last_error,
+                frontend_dir, scope_file, contracts_dir, debug_dir,
+            )
             file_paths = [f.get("path", "?") for f in patch.get("files", [])]
             emit(f"Code generated: {', '.join(file_paths)}", _format_files_detail(patch))
         except ValueError as exc:
             return False, str(exc)
 
         emit("Validating with npm build...")
-        scratch = create_scratch_copy(FRONTEND, "frontend_attempt")
+        scratch = create_scratch_copy(frontend_dir, "frontend_attempt")
         _apply_changes(patch, scratch)
         ok, output = _run_frontend_checks(scratch)
         if ok:
             emit("Validation passed")
-            promote_scratch_copy(scratch, FRONTEND)
+            promote_scratch_copy(scratch, frontend_dir)
             scope = update_scope(
-                SCOPE_FILE,
+                scope_file,
                 {
                     "id": story.id,
                     "title": story.title,
@@ -619,9 +647,9 @@ def implement_frontend(
                     "applied_at": datetime.utcnow().isoformat(),
                 },
             )
-            save_json(SCOPE_FILE, scope)
+            save_json(scope_file, scope)
             retry_note = f" (attempt {attempt + 1})" if attempt > 0 else ""
-            return True, f"Patched {FRONTEND}. build passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
+            return True, f"Patched {frontend_dir}. build passed{retry_note}. Scope entries: {len(scope['implemented_stories'])}"
         emit("Validation failed, retrying...", output)
         last_error = output
 

@@ -13,16 +13,29 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  submitRequirement: (text, autoApprove = false) =>
+  listProjects: () => request("/projects"),
+
+  createProject: (slug) =>
+    request("/projects", { method: "POST", body: JSON.stringify({ slug }) }),
+
+  submitRequirement: (text, autoApprove = false, options = {}) =>
     request("/requirements", {
       method: "POST",
-      body: JSON.stringify({ text, auto_approve: autoApprove }),
+      body: JSON.stringify({
+        text,
+        auto_approve: autoApprove,
+        ...options,
+      }),
     }),
 
-  submitFromFile: (filename, autoApprove = false) =>
+  submitFromFile: (filename, autoApprove = false, options = {}) =>
     request("/requirements/from-file", {
       method: "POST",
-      body: JSON.stringify({ filename, auto_approve: autoApprove }),
+      body: JSON.stringify({
+        filename,
+        auto_approve: autoApprove,
+        ...options,
+      }),
     }),
 
   listRequirements: () => request("/requirements"),
@@ -37,8 +50,11 @@ export const api = {
 
   getStories: (packId) => request(`/storypacks/${packId}/stories`),
 
-  approveStorypack: (id) =>
-    request(`/storypacks/${id}/approve`, { method: "POST" }),
+  approveStorypack: (id, options = {}) =>
+    request(`/storypacks/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify(Object.keys(options).length ? options : {}),
+    }),
 
   rejectStorypack: (id) =>
     request(`/storypacks/${id}/reject`, { method: "POST" }),
@@ -54,10 +70,17 @@ export const api = {
   getTestResults: (packId) =>
     request(`/tests/results${packId ? `?storypack_id=${packId}` : ""}`),
 
-  getWorkspaceFiles: () => request("/workspace/files"),
+  getWorkspaceFiles: (projectId) =>
+    request(
+      `/workspace/files${projectId && projectId !== "default" ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,
+    ),
 
-  getWorkspaceFile: (path) =>
-    request(`/workspace/file?path=${encodeURIComponent(path)}`),
+  getWorkspaceFile: (path, projectId) =>
+    request(
+      `/workspace/file?path=${encodeURIComponent(path)}${
+        projectId && projectId !== "default" ? `&project_id=${encodeURIComponent(projectId)}` : ""
+      }`,
+    ),
 
   submitFix: ({ storypack_id, story_id, agent_type, error_text, user_instructions }) =>
     request("/agents/fix", {
@@ -119,10 +142,10 @@ export const api = {
     return request(`/comms/inbox${qs ? `?${qs}` : ""}`);
   },
 
-  submitEnhancement: ({ agent_type, description, context }) =>
+  submitEnhancement: ({ agent_type, description, context, project_id = "default" }) =>
     request("/enhance", {
       method: "POST",
-      body: JSON.stringify({ agent_type, description, context }),
+      body: JSON.stringify({ agent_type, description, context, project_id }),
     }),
 
   getEnhanceStatus: () => request("/enhance/status"),

@@ -13,9 +13,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import state_store
 from agents.reasoning import restore_backup, list_backups
+from workspace_paths import ensure_project_layout, normalize_project_id, resolve_workspace_dir
 from dashboard.backend.execution import enhance_state, run_enhancement_background
-
-WORKSPACE = PROJECT_ROOT / "workspace"
 
 router = APIRouter(tags=["enhancements"])
 
@@ -24,6 +23,7 @@ class EnhancementRequest(BaseModel):
     agent_type: str
     description: str
     context: str = ""
+    project_id: str = "default"
 
 
 @router.post("/enhance")
@@ -35,17 +35,21 @@ def submit_enhancement(req: EnhancementRequest):
         raise HTTPException(409, "An enhancement is already running. Wait for it to finish.")
 
     enhance_id = f"enh_{uuid.uuid4().hex[:8]}"
+    pid = normalize_project_id(req.project_id)
+    if pid != "default":
+        ensure_project_layout(pid)
     state_store.save_enhancement(
         enhance_id=enhance_id,
         agent_type=req.agent_type,
         description=req.description,
         context=req.context,
+        project_id=pid,
     )
 
     thread = threading.Thread(target=run_enhancement_background, args=(enhance_id,), daemon=True)
     thread.start()
 
-    return {"enhance_id": enhance_id, "status": "pending"}
+    return {"enhance_id": enhance_id, "status": "pending", "project_id": pid}
 
 
 @router.get("/enhance/status")
@@ -80,7 +84,8 @@ def rollback_enhancement(enhance_id: str):
         raise HTTPException(400, "No backup available for this enhancement.")
 
     try:
-        restore_backup(bp, WORKSPACE)
+        ws = resolve_workspace_dir(enh.get("project_id"))
+        restore_backup(bp, ws)
         state_store.update_enhancement_status(enhance_id, "rolled_back", "Workspace restored from backup.")
         return {"status": "rolled_back", "message": f"Workspace restored from backup: {bp}"}
     except FileNotFoundError:

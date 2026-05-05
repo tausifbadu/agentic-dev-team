@@ -3,19 +3,27 @@ import { api } from "../api";
 
 export default function Workspace() {
   const [tree, setTree] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState("default");
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileContent, setFileContent] = useState(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    api.getWorkspaceFiles().then(setTree).catch(console.error);
+    api.listProjects().then((r) => setProjects(r.projects || [])).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    api.getWorkspaceFiles(projectId).then(setTree).catch(console.error);
+    setSelectedFile(null);
+    setFileContent(null);
+  }, [projectId]);
 
   const openFile = async (path) => {
     setSelectedFile(path);
     setLoading(true);
     try {
-      const data = await api.getWorkspaceFile(path);
+      const data = await api.getWorkspaceFile(path, projectId);
       setFileContent(data);
     } catch (err) {
       setFileContent({ path, content: `Error: ${err.message}`, size: 0 });
@@ -29,6 +37,23 @@ export default function Workspace() {
       <div>
         <h2 className="text-xl font-semibold text-white">Workspace</h2>
         <p className="text-sm text-slate-500 mt-1">Browse generated source files</p>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <label htmlFor="ws-project" className="text-xs text-slate-500 uppercase tracking-wider">
+            Project
+          </label>
+          <select
+            id="ws-project"
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/40 min-w-[200px]"
+          >
+            {(projects.length ? projects : [{ id: "default" }]).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.id === "default" ? "default (workspace/)" : p.id}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5 min-h-[450px]">

@@ -22,16 +22,54 @@ export default function StoryBoard() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+
   const refresh = () => {
     api.getStorypack(packId).then(setPack).catch(setError).finally(() => setLoading(false));
   };
 
   useEffect(refresh, [packId]);
 
-  const handleApprove = async () => {
+  useEffect(() => {
+    if (pack?.stories?.length) {
+      setSelectedIds(new Set(pack.stories.map((s) => s.id)));
+    }
+  }, [pack?.id]);
+
+  const toggleStory = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllStories = () => {
+    if (!pack?.stories) return;
+    setSelectedIds(new Set(pack.stories.map((s) => s.id)));
+  };
+
+  const clearStorySelection = () => {
+    setSelectedIds(new Set());
+  };
+
+  const handleApprove = async (fastTrack = false) => {
+    if (!pack?.stories?.length) return;
+    const allIds = new Set(pack.stories.map((s) => s.id));
+    const fullSelection =
+      selectedIds.size === allIds.size && [...allIds].every((id) => selectedIds.has(id));
+    if (!fullSelection && selectedIds.size === 0) {
+      setError("Select at least one story to implement.");
+      return;
+    }
     setActionLoading(true);
+    setError(null);
     try {
-      await api.approveStorypack(packId);
+      const opts = {};
+      if (fastTrack) opts.fast_track = true;
+      if (!fullSelection) opts.story_ids = Array.from(selectedIds);
+      await api.approveStorypack(packId, opts);
       refresh();
       navigate("/agents");
     } catch (err) {
@@ -54,7 +92,7 @@ export default function StoryBoard() {
   };
 
   if (loading) return <p className="text-sm text-slate-500">Loading...</p>;
-  if (error) return <p className="text-sm text-rose-400">{String(error)}</p>;
+  if (!pack && error) return <p className="text-sm text-rose-400">{String(error)}</p>;
   if (!pack) return <p className="text-sm text-slate-500">StoryPack not found.</p>;
 
   const storiesByStatus = {};
@@ -66,6 +104,11 @@ export default function StoryBoard() {
 
   return (
     <div className="space-y-8">
+      {error && (
+        <p className="text-sm text-rose-400 bg-rose-950/40 border border-rose-500/25 rounded-lg px-4 py-2">
+          {String(error)}
+        </p>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-semibold text-white">Story Board</h2>
@@ -89,11 +132,20 @@ export default function StoryBoard() {
               Reject
             </button>
             <button
-              onClick={handleApprove}
+              onClick={() => handleApprove(false)}
               disabled={actionLoading}
               className="px-4 py-2.5 text-sm font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-500 disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:ring-offset-2 focus:ring-offset-surface-0"
             >
               {actionLoading ? "Processing..." : "Approve & Run Agents"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApprove(true)}
+              disabled={actionLoading}
+              title="Skips test agent phase and smoke phase"
+              className="px-4 py-2.5 text-sm font-medium text-amber-300 rounded-lg border border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+            >
+              {actionLoading ? "…" : "Fast track"}
             </button>
           </div>
         )}
@@ -105,6 +157,31 @@ export default function StoryBoard() {
           {pack.requirement_text}
         </p>
       </div>
+
+      {pack.status === "pending_review" && (
+        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
+          <span>
+            Run{" "}
+            <span className="text-slate-200 font-medium">{selectedIds.size}</span>
+            {" / "}
+            {pack.stories.length} stories (prerequisite stories are added automatically).
+          </span>
+          <button
+            type="button"
+            onClick={selectAllStories}
+            className="text-xs font-medium text-accent hover:underline"
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            onClick={clearStorySelection}
+            className="text-xs font-medium text-slate-500 hover:text-slate-300"
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         {STATUS_COLUMNS.map((col) => (
@@ -120,7 +197,13 @@ export default function StoryBoard() {
             </div>
             <div className="p-3 space-y-2.5 min-h-[120px]">
               {storiesByStatus[col.key].map((story) => (
-                <StoryCard key={story.id} story={story} />
+                <StoryCard
+                  key={story.id}
+                  story={story}
+                  selectable={pack.status === "pending_review"}
+                  selected={selectedIds.has(story.id)}
+                  onToggleSelect={() => toggleStory(story.id)}
+                />
               ))}
               {storiesByStatus[col.key].length === 0 && (
                 <p className="text-xs text-slate-600 text-center py-8">No stories</p>
@@ -133,57 +216,74 @@ export default function StoryBoard() {
   );
 }
 
-function StoryCard({ story }) {
+function StoryCard({ story, selectable, selected, onToggleSelect }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <div
       className="bg-surface-2 border border-border-subtle rounded-lg p-3 cursor-pointer hover:border-border-strong transition-all duration-150"
       onClick={() => setExpanded(!expanded)}
     >
-      <div className="flex items-start justify-between gap-2">
-        <p className="text-[13px] font-medium text-slate-200">{story.title}</p>
-        <span
-          className={`inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded ring-1 ring-inset whitespace-nowrap ${
-            OWNERSHIP_STYLES[story.ownership] || "bg-slate-500/15 text-slate-400 ring-slate-500/20"
-          }`}
-        >
-          {story.ownership}
-        </span>
-      </div>
-      <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">{story.description}</p>
-      {expanded && (
-        <div className="mt-3 pt-3 border-t border-border-subtle space-y-2.5 text-xs">
-          <div>
-            <p className="font-medium text-slate-400 mb-1">Acceptance Criteria</p>
-            <ul className="space-y-1 text-slate-500">
-              {story.acceptance_criteria.map((ac, i) => (
-                <li key={i} className="flex gap-1.5">
-                  <span className="text-accent mt-0.5 shrink-0">-</span>
-                  {ac}
-                </li>
-              ))}
-            </ul>
+      <div className="flex items-start gap-2.5">
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(e) => {
+              e.stopPropagation();
+              onToggleSelect();
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 rounded border-border-strong text-emerald-600 focus:ring-emerald-500/40"
+            aria-label={`Include ${story.title} in run`}
+          />
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-[13px] font-medium text-slate-200">{story.title}</p>
+            <span
+              className={`inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded ring-1 ring-inset whitespace-nowrap ${
+                OWNERSHIP_STYLES[story.ownership] || "bg-slate-500/15 text-slate-400 ring-slate-500/20"
+              }`}
+            >
+              {story.ownership}
+            </span>
           </div>
-          {story.implementation_notes?.length > 0 && (
-            <div>
-              <p className="font-medium text-slate-400 mb-1">Notes</p>
-              <ul className="space-y-1 text-slate-500">
-                {story.implementation_notes.map((n, i) => (
-                  <li key={i} className="flex gap-1.5">
-                    <span className="text-violet-400 mt-0.5 shrink-0">-</span>
-                    {n}
-                  </li>
-                ))}
-              </ul>
+          <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">{story.description}</p>
+          {expanded && (
+            <div className="mt-3 pt-3 border-t border-border-subtle space-y-2.5 text-xs">
+              <div>
+                <p className="font-medium text-slate-400 mb-1">Acceptance Criteria</p>
+                <ul className="space-y-1 text-slate-500">
+                  {story.acceptance_criteria.map((ac, i) => (
+                    <li key={i} className="flex gap-1.5">
+                      <span className="text-accent mt-0.5 shrink-0">-</span>
+                      {ac}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {story.implementation_notes?.length > 0 && (
+                <div>
+                  <p className="font-medium text-slate-400 mb-1">Notes</p>
+                  <ul className="space-y-1 text-slate-500">
+                    {story.implementation_notes.map((n, i) => (
+                      <li key={i} className="flex gap-1.5">
+                        <span className="text-violet-400 mt-0.5 shrink-0">-</span>
+                        {n}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {story.dependencies?.length > 0 && (
+                <p className="text-slate-600">
+                  Depends on: <span className="font-mono text-slate-500">{story.dependencies.join(", ")}</span>
+                </p>
+              )}
             </div>
           )}
-          {story.dependencies?.length > 0 && (
-            <p className="text-slate-600">
-              Depends on: <span className="font-mono text-slate-500">{story.dependencies.join(", ")}</span>
-            </p>
-          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

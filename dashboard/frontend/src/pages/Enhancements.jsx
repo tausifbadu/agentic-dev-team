@@ -11,6 +11,8 @@ const STATUS_STYLES = {
 
 export default function Enhancements() {
   const [agentType, setAgentType] = useState("frontend");
+  const [projectId, setProjectId] = useState("default");
+  const [projects, setProjects] = useState([]);
   const [description, setDescription] = useState("");
   const [context, setContext] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -25,6 +27,7 @@ export default function Enhancements() {
 
   useEffect(() => {
     loadEnhancements();
+    api.listProjects().then((r) => setProjects(r.projects || [])).catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -44,6 +47,7 @@ export default function Enhancements() {
         agent_type: agentType,
         description: description.trim(),
         context: context.trim(),
+        project_id: projectId,
       });
       setSubmitResult({ ok: true, msg: `Enhancement submitted (${res.enhance_id})` });
       setDescription("");
@@ -84,6 +88,22 @@ export default function Enhancements() {
           </p>
         </div>
         <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
+              Project workspace
+            </label>
+            <select
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              className="w-full max-w-md bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {(projects.length ? projects : [{ id: "default" }]).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.id === "default" ? "default (workspace/)" : p.id}
+                </option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
               Target Agent

@@ -92,6 +92,7 @@ class Supervisor:
         workspace_dir: Path,
         config: SupervisorConfig | None = None,
         on_progress: ProgressCallback = None,
+        all_stories: list[Story] | None = None,
     ):
         self.storypack_id = storypack_id
         self.run_id = f"run_{uuid.uuid4().hex[:8]}"
@@ -108,6 +109,7 @@ class Supervisor:
             max_tool_calls=min(self.config.max_total_tool_calls, env_budget.max_tool_calls),
             max_wall_seconds=min(self.config.max_wall_seconds, env_budget.max_wall_seconds),
         )
+        ctx_stories = all_stories if all_stories is not None else stories
         self.run_ctx = RunContext(
             storypack_id=storypack_id,
             run_id=self.run_id,
@@ -115,7 +117,7 @@ class Supervisor:
             bus=self.bus,
             budget=self.budget,
             requirement_text=requirement_text,
-            all_stories=stories,
+            all_stories=ctx_stories,
         )
 
         # Instantiate agents and register them on the bus.
@@ -343,10 +345,10 @@ class Supervisor:
             self._log("supervisor", "info", "Smoke helpers unavailable; skipping smoke phase.")
             return
 
-        be_ok, be_msg = _smoke_test_backend()
+        be_ok, be_msg = _smoke_test_backend(self.workspace_dir)
         self._log("supervisor", "info" if be_ok else "error",
                   f"Backend smoke: {'PASS' if be_ok else 'FAIL'}", be_msg[:1200])
-        fe_ok, fe_msg = _smoke_test_frontend()
+        fe_ok, fe_msg = _smoke_test_frontend(self.workspace_dir)
         self._log("supervisor", "info" if fe_ok else "error",
                   f"Frontend smoke: {'PASS' if fe_ok else 'FAIL'}", fe_msg[:1200])
 

@@ -4,6 +4,8 @@ import { api } from "../api";
 
 export default function Requirements() {
   const [requirements, setRequirements] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState("default");
   const [promptFiles, setPromptFiles] = useState([]);
   const [text, setText] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
@@ -11,12 +13,31 @@ export default function Requirements() {
   const [error, setError] = useState(null);
   const navigate = useNavigate();
 
+  const [newProjectSlug, setNewProjectSlug] = useState("");
+
   const refresh = () => {
     api.listRequirements().then(setRequirements).catch(console.error);
     api.listPromptFiles().then(setPromptFiles).catch(console.error);
+    api.listProjects().then((r) => setProjects(r.projects || [])).catch(console.error);
   };
 
   useEffect(refresh, []);
+
+  const createProject = async () => {
+    if (!newProjectSlug.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await api.createProject(newProjectSlug.trim());
+      setNewProjectSlug("");
+      setProjectId(r.id);
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -24,7 +45,7 @@ export default function Requirements() {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.submitRequirement(text.trim(), autoApprove);
+      const result = await api.submitRequirement(text.trim(), autoApprove, { project_id: projectId });
       setText("");
       refresh();
       navigate(`/stories/${result.storypack_id}`);
@@ -39,7 +60,7 @@ export default function Requirements() {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.submitFromFile(filename, autoApprove);
+      const result = await api.submitFromFile(filename, autoApprove, { project_id: projectId });
       refresh();
       navigate(`/stories/${result.storypack_id}`);
     } catch (err) {
@@ -60,6 +81,54 @@ export default function Requirements() {
 
       <div className="bg-surface-1 rounded-xl border border-border p-6">
         <form onSubmit={submit} className="space-y-4">
+          <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label
+                htmlFor="project-select"
+                className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2"
+              >
+                Project workspace
+              </label>
+              <select
+                id="project-select"
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/40 min-w-[180px]"
+              >
+                {(projects.length ? projects : [{ id: "default" }]).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id === "default" ? "default (legacy workspace/)" : p.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-end gap-2">
+              <div>
+                <label
+                  htmlFor="new-project-slug"
+                  className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2"
+                >
+                  New project slug
+                </label>
+                <input
+                  id="new-project-slug"
+                  type="text"
+                  value={newProjectSlug}
+                  onChange={(e) => setNewProjectSlug(e.target.value)}
+                  placeholder="my-app"
+                  className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 w-40 focus:outline-none focus:ring-2 focus:ring-accent/40"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={createProject}
+                disabled={loading || !newProjectSlug.trim()}
+                className="mb-0.5 px-4 py-2 text-sm font-medium rounded-lg bg-surface-3 text-slate-300 border border-border hover:bg-surface-4 disabled:opacity-40"
+              >
+                Create
+              </button>
+            </div>
+          </div>
           <div>
             <label htmlFor="req-input" className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
               Describe what you want to build
