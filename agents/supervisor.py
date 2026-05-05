@@ -1,0 +1,480 @@
+"""Supervisor — light-touch coordinator for the agentic runtime.
+
+The Supervisor replaces the fixed `_run_pipeline()` script. Its job is:
+
+  1. Bootstrap the bus, register all agents, and seed the run.
+  2. Hand off control to the agents — each one runs its own ReAct loop and
+     self-heals via tools (read_file, run_pytest, smoke_uvicorn, etc.).
+  3. Enforce safety: wall-clock timeout, total tool-call budget, halt requests.
+  4. Coordinate phases that genuinely depend on order (backend before contract
+     publish, contract before frontend, code before tests). Inside each phase
+     agents act with full autonomy via tools and the bus.
+  5. When an agent self-reports failure (via `finish_story(success=false)` or a
+     runtime error), ask PM ONCE for a product-level rescope decision —
+     simplify, skip, or halt. PM is **not** invoked to debug code; that role
+     belongs to the dev agent itself.
+
+This file is the thinnest possible orchestration shim — the heavy lifting
+(implementation, debugging, validation) lives in agent ReAct loops + tools.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from agents.agentic import (
+    AgentBase,
+    BackendAgent,
+    Budget,
+    FrontendAgent,
+    PMAgent,
+    RunContext,
+    RunResult,
+    TestAgent,
+)
+from agents.bus import MessageBus
+from agents.reasoning import extract_api_contract, save_json
+from schemas import Story
+import state_store
+
+
+@dataclass
+class SupervisorConfig:
+    # Kept for backward compat with callers — no longer used by the runtime.
+    # Dev agents now self-heal inside their own ReAct loop; the supervisor only
+    # asks PM once per failure for a rescope decision (skip/simplify/halt).
+    max_pm_heal_attempts: int = 0
+    max_wall_seconds: float = 1800.0   # 30 min default
+    max_total_tool_calls: int = 600
+    run_tests: bool = True
+    run_smoke: bool = True
+
+
+@dataclass
+class StoryOutcome:
+    story_id: str
+    title: str
+    ownership: str
+    status: str          # "passed" | "failed" | "skipped"
+    iterations: int
+    tool_calls: int
+    summary: str
+    heal_attempts: int = 0
+
+
+@dataclass
+class SupervisorResult:
+    success: bool
+    summary: str
+    outcomes: list[StoryOutcome] = field(default_factory=list)
+    total_tool_calls: int = 0
+    elapsed_s: float = 0.0
+
+
+ProgressCallback = Optional[Callable[[str, str, str, Optional[str]], None]]
+"""(agent_id, level, message, detail) — surfaced to the dashboard as agent_logs rows."""
+
+
+class Supervisor:
+    """Drives one full requirement-to-validated-app run."""
+
+    def __init__(
+        self,
+        *,
+        storypack_id: str,
+        requirement_text: str,
+        stories: list[Story],
+        workspace_dir: Path,
+        config: SupervisorConfig | None = None,
+        on_progress: ProgressCallback = None,
+    ):
+        self.storypack_id = storypack_id
+        self.run_id = f"run_{uuid.uuid4().hex[:8]}"
+        self.requirement_text = requirement_text
+        self.stories = stories
+        self.workspace_dir = workspace_dir
+        self.config = config or SupervisorConfig()
+        self.on_progress = on_progress or (lambda agent, level, msg, detail=None: None)
+
+        self.bus = MessageBus(storypack_id=storypack_id, run_id=self.run_id)
+        # Allow env-based overrides for budgets (config args win when explicitly set).
+        env_budget = Budget.from_env()
+        self.budget = Budget(
+            max_tool_calls=min(self.config.max_total_tool_calls, env_budget.max_tool_calls),
+            max_wall_seconds=min(self.config.max_wall_seconds, env_budget.max_wall_seconds),
+        )
+        self.run_ctx = RunContext(
+            storypack_id=storypack_id,
+            run_id=self.run_id,
+            workspace_dir=workspace_dir,
+            bus=self.bus,
+            budget=self.budget,
+            requirement_text=requirement_text,
+            all_stories=stories,
+        )
+
+        # Instantiate agents and register them on the bus.
+        self.pm = PMAgent(self.run_ctx, on_progress=self._mk_progress("pm"))
+        self.backend = BackendAgent(self.run_ctx, on_progress=self._mk_progress("backend"))
+        self.frontend = FrontendAgent(self.run_ctx, on_progress=self._mk_progress("frontend"))
+        self.test = TestAgent(self.run_ctx, on_progress=self._mk_progress("test"))
+
+        for agent in (self.pm, self.backend, self.frontend, self.test):
+            agent.register_with_bus()
+
+        # Pipeline state for the dashboard.
+        self.outcomes: dict[str, StoryOutcome] = {}
+
+    # ---------- Public entry point ----------
+
+    def run(self) -> SupervisorResult:
+        started = time.monotonic()
+        self._log("supervisor", "info",
+                  f"Run {self.run_id} starting with {len(self.stories)} stories.")
+        self.bus.publish(
+            topic="run.started",
+            from_agent="supervisor",
+            payload={"storypack_id": self.storypack_id, "run_id": self.run_id,
+                     "story_count": len(self.stories)},
+            summary=f"Run started: {len(self.stories)} stories",
+        )
+
+        try:
+            backend_stories = self._sort([s for s in self.stories if s.ownership == "backend"])
+            frontend_stories = self._sort([s for s in self.stories if s.ownership == "frontend"])
+            test_stories = self._sort([s for s in self.stories if s.ownership == "testing"])
+
+            # Phase 1: Backend stories.
+            self._log("supervisor", "info",
+                      f"Phase: backend ({len(backend_stories)} stories)")
+            for story in backend_stories:
+                if self._budget_exceeded():
+                    break
+                self._run_story(self.backend, story)
+
+            # After backend phase, publish the contract for frontend agents to consume.
+            if any(o.status == "passed" for sid, o in self.outcomes.items()
+                   if any(s.id == sid and s.ownership == "backend" for s in self.stories)):
+                self._publish_contract()
+
+            # Phase 2: Frontend stories.
+            self._log("supervisor", "info",
+                      f"Phase: frontend ({len(frontend_stories)} stories)")
+            for story in frontend_stories:
+                if self._budget_exceeded():
+                    break
+                # Frontend story is skipped if its declared backend dependency failed.
+                if not self._dependencies_satisfied(story):
+                    self._mark_skipped(story, "Skipped: backend dependency failed")
+                    continue
+                self._run_story(self.frontend, story)
+
+            # Phase 3: Test suite (run once for the whole pack).
+            if self.config.run_tests and (test_stories or self._has_passed("backend") or self._has_passed("frontend")):
+                test_story = test_stories[0] if test_stories else None
+                self._log("supervisor", "info", "Phase: testing")
+                if not self._budget_exceeded():
+                    self._run_story(self.test, test_story or _make_synthetic_test_story())
+
+            # Phase 4: Smoke (optional).
+            if self.config.run_smoke and not self._budget_exceeded():
+                self._log("supervisor", "info", "Phase: smoke")
+                self._run_smoke_phase()
+
+            success = all(o.status == "passed" for o in self.outcomes.values())
+            summary_msg = self._final_summary(success)
+            self._log("supervisor", "info" if success else "error", summary_msg)
+            self.bus.publish(
+                topic="run.completed" if success else "run.failed",
+                from_agent="supervisor",
+                payload={"summary": summary_msg},
+                summary=summary_msg[:200],
+            )
+
+            return SupervisorResult(
+                success=success,
+                summary=summary_msg,
+                outcomes=list(self.outcomes.values()),
+                total_tool_calls=self.budget.tool_calls_used,
+                elapsed_s=time.monotonic() - started,
+            )
+        finally:
+            for agent in (self.pm, self.backend, self.frontend, self.test):
+                agent.unregister()
+            self.bus.close()
+
+    # ---------- Core story execution: agent self-heals; PM only handles rescope ----------
+
+    def _run_story(
+        self, agent: AgentBase, story: Story, *, allow_simplify: bool = True
+    ) -> StoryOutcome:
+        """Run one story to completion.
+
+        Architectural note (Apr 2026): the previous implementation wrapped the
+        agent's ReAct loop in an outer "PM heal" cycle that retried up to 4 times
+        with PM-supplied advice between attempts. That coupled product decisions
+        (PM) to engineering debugging (dev agent) and produced lower-quality
+        instructions than the agent's own reasoning. The current model:
+
+          1. The dev agent runs ONE long ReAct loop and self-heals using its own
+             tools (read_file, grep, run_pytest, smoke_uvicorn, etc.). It now has
+             ~60 iterations and a Definition-of-Done gate on `finish_story`.
+          2. If the agent itself signals failure (`finish_story(success=false)`
+             or a runtime error), the supervisor asks PM ONCE for a product-level
+             rescope decision (simplify / skip / halt). PM never debugs code.
+          3. A simplified story re-runs through the agent ONCE more — but with
+             ``allow_simplify=False`` so we don't recurse forever.
+        """
+        if story is None:
+            return None  # type: ignore[return-value]
+
+        self._log(agent.agent_id, "info", f"Starting story: {story.title}")
+        self.bus.publish(
+            topic="story.assigned",
+            from_agent="supervisor",
+            payload={"agent": agent.agent_id, "story": story.model_dump()},
+            story_id=story.id,
+            summary=f"Assigned to {agent.agent_id}: {story.title}",
+        )
+
+        outcome = StoryOutcome(
+            story_id=story.id,
+            title=story.title,
+            ownership=story.ownership,
+            status="failed",
+            iterations=0,
+            tool_calls=0,
+            summary="",
+        )
+
+        if self._budget_exceeded():
+            outcome.summary = "Aborted: budget exceeded before story start"
+            self.outcomes[story.id] = outcome
+            return outcome
+
+        # ---- Single autonomous attempt ----
+        result: RunResult = agent.run(story)
+        outcome.iterations = result.iterations
+        outcome.tool_calls = result.tool_calls
+
+        if result.success:
+            outcome.status = "passed"
+            outcome.summary = result.summary
+            self.bus.publish(
+                topic="story.completed",
+                from_agent=agent.agent_id,
+                payload={"summary": result.summary},
+                story_id=story.id,
+                summary=result.summary[:160],
+            )
+            self.outcomes[story.id] = outcome
+            return outcome
+
+        # ---- Agent-reported failure → publish + ask PM for rescope only ----
+        self.bus.publish(
+            topic="story.failed",
+            from_agent=agent.agent_id,
+            payload={"summary": result.summary},
+            story_id=story.id,
+            summary=f"Story failed: {result.summary[:120]}",
+        )
+
+        # Persist a cross-run learning entry so future PM story-creation is smarter.
+        try:
+            state_store.save_failure_pattern(
+                self.storypack_id, story.title, agent.agent_id,
+                "agent_self_failed",
+                result.summary[:200],
+                "Agent could not converge within its iteration cap.",
+            )
+        except Exception:
+            pass
+
+        # PM rescope is a *product* decision (skip/simplify/halt), not debugging.
+        rescope_reply = self.bus.request(
+            from_agent="supervisor",
+            to_agent="pm",
+            event_type="rescope_request",
+            payload={"story_id": story.id, "errors": result.summary[:4000]},
+            timeout=120,
+        )
+        decision = ((rescope_reply or {}).get("payload") or {}).get("decision", "halt")
+        reason = ((rescope_reply or {}).get("payload") or {}).get("reason", "")
+        self._log("pm", "info", f"PM rescope for {story.title}: {decision}", reason)
+
+        if decision == "skip":
+            outcome.status = "skipped"
+            outcome.summary = f"Skipped: {reason}"
+        elif decision == "simplify" and allow_simplify:
+            simplified_data = ((rescope_reply or {}).get("payload") or {}).get("simplified_story")
+            if isinstance(simplified_data, dict):
+                try:
+                    simpler = Story(**{**story.model_dump(), **simplified_data})
+                    self._log("pm", "info", f"Retrying with simplified story: {simpler.title}")
+                    sub_outcome = self._run_story(agent, simpler, allow_simplify=False)
+                    # Aggregate cumulative work back onto the parent outcome.
+                    sub_outcome.iterations += outcome.iterations
+                    sub_outcome.tool_calls += outcome.tool_calls
+                    return sub_outcome
+                except Exception as exc:  # noqa: BLE001
+                    outcome.status = "failed"
+                    outcome.summary = f"Simplify produced invalid story: {exc}"
+            else:
+                outcome.status = "failed"
+                outcome.summary = "PM simplify did not return a valid story object"
+        else:
+            outcome.status = "failed"
+            outcome.summary = f"Halted: {reason or 'PM determined unrecoverable'}"
+
+        self.outcomes[story.id] = outcome
+        return outcome
+
+    # ---------- Smoke phase: boot uvicorn + npm dev and check for errors ----------
+
+    def _run_smoke_phase(self) -> None:
+        try:
+            from dashboard.backend.execution import _smoke_test_backend, _smoke_test_frontend  # type: ignore
+        except Exception:
+            self._log("supervisor", "info", "Smoke helpers unavailable; skipping smoke phase.")
+            return
+
+        be_ok, be_msg = _smoke_test_backend()
+        self._log("supervisor", "info" if be_ok else "error",
+                  f"Backend smoke: {'PASS' if be_ok else 'FAIL'}", be_msg[:1200])
+        fe_ok, fe_msg = _smoke_test_frontend()
+        self._log("supervisor", "info" if fe_ok else "error",
+                  f"Frontend smoke: {'PASS' if fe_ok else 'FAIL'}", fe_msg[:1200])
+
+        self.bus.publish(
+            topic="smoke.completed",
+            from_agent="supervisor",
+            payload={"backend_ok": be_ok, "frontend_ok": fe_ok},
+            summary=f"Smoke: backend {'PASS' if be_ok else 'FAIL'}, frontend {'PASS' if fe_ok else 'FAIL'}",
+        )
+
+    # ---------- Helpers ----------
+
+    def _publish_contract(self) -> None:
+        try:
+            contract = extract_api_contract(self.workspace_dir / "backend")
+            (self.workspace_dir / "contracts").mkdir(parents=True, exist_ok=True)
+            save_json(self.workspace_dir / "contracts" / "api_contract.json", contract)
+            self.bus.publish(
+                topic="contract.published",
+                from_agent="backend",
+                payload=contract,
+                summary=f"{len(contract.get('routes', []))} routes, {len(contract.get('models', []))} models",
+            )
+            self._log("supervisor", "info",
+                      f"Contract published ({len(contract.get('routes', []))} routes)")
+        except Exception as exc:  # noqa: BLE001
+            self._log("supervisor", "error", f"Contract publish failed: {exc}")
+
+    def _sort(self, stories: list[Story]) -> list[Story]:
+        """Topological sort within a phase (matches old behaviour)."""
+        id_set = {s.id for s in stories}
+        by_id = {s.id: s for s in stories}
+        in_degree: dict[str, int] = {s.id: 0 for s in stories}
+        for s in stories:
+            for dep in s.dependencies:
+                if dep in id_set:
+                    in_degree[s.id] = in_degree.get(s.id, 0) + 1
+        queue = [sid for sid, deg in in_degree.items() if deg == 0]
+        ordered: list[Story] = []
+        while queue:
+            queue.sort()
+            sid = queue.pop(0)
+            ordered.append(by_id[sid])
+            for s in stories:
+                if sid in s.dependencies and s.id in id_set:
+                    in_degree[s.id] -= 1
+                    if in_degree[s.id] == 0:
+                        queue.append(s.id)
+        remaining = [s for s in stories if s not in ordered]
+        ordered.extend(remaining)
+        return ordered
+
+    def _dependencies_satisfied(self, story: Story) -> bool:
+        for dep in story.dependencies:
+            outcome = self.outcomes.get(dep)
+            if outcome and outcome.status != "passed":
+                return False
+        return True
+
+    def _has_passed(self, ownership: str) -> bool:
+        for s in self.stories:
+            if s.ownership == ownership and self.outcomes.get(s.id, StoryOutcome(
+                story_id="", title="", ownership="", status="failed",
+                iterations=0, tool_calls=0, summary=""
+            )).status == "passed":
+                return True
+        return False
+
+    def _mark_skipped(self, story: Story, reason: str) -> None:
+        outcome = StoryOutcome(
+            story_id=story.id, title=story.title, ownership=story.ownership,
+            status="skipped", iterations=0, tool_calls=0, summary=reason,
+        )
+        self.outcomes[story.id] = outcome
+        self._log("supervisor", "info", f"Skipped {story.title}: {reason}")
+
+    def _budget_exceeded(self) -> bool:
+        if self.budget.wall_exceeded():
+            self._log("supervisor", "error", "Wall-clock budget exceeded; halting run.")
+            return True
+        if self.budget.tool_calls_exceeded():
+            self._log("supervisor", "error", "Tool-call budget exceeded; halting run.")
+            return True
+        return False
+
+    def _final_summary(self, success: bool) -> str:
+        passed = sum(1 for o in self.outcomes.values() if o.status == "passed")
+        skipped = sum(1 for o in self.outcomes.values() if o.status == "skipped")
+        failed = sum(1 for o in self.outcomes.values() if o.status == "failed")
+        return (
+            f"Run {self.run_id} {'succeeded' if success else 'finished with failures'}: "
+            f"{passed} passed, {failed} failed, {skipped} skipped, "
+            f"{self.budget.tool_calls_used} tool calls."
+        )
+
+    def _log(self, agent: str, level: str, msg: str, detail: Optional[str] = None) -> None:
+        try:
+            state_store.add_agent_log(None, agent, msg, level=level, detail=detail)
+        except Exception:
+            pass
+        try:
+            self.on_progress(agent, level, msg, detail)
+        except Exception:
+            pass
+
+    def _mk_progress(self, agent_id: str):
+        def cb(level: str, message: str, detail: Optional[str] = None):
+            try:
+                state_store.add_agent_log(None, agent_id, message, level=level, detail=detail)
+            except Exception:
+                pass
+            try:
+                self.on_progress(agent_id, level, message, detail)
+            except Exception:
+                pass
+        return cb
+
+
+def _make_synthetic_test_story() -> Story:
+    """Used when the storypack has no explicit testing story but we still want the
+    test agent to run a regression suite."""
+    return Story(
+        id="synthetic_test_suite",
+        title="Test Suite",
+        description="Generate regression tests for the implemented stories.",
+        acceptance_criteria=["API tests pass", "UI tests cover key flows"],
+        implementation_notes=["Use pytest + httpx for API tests"],
+        test_focus=["End-to-end happy path"],
+        ownership="testing",
+        dependencies=[],
+    )

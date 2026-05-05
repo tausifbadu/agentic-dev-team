@@ -1,7 +1,11 @@
-state/*.json
+state/
 workspace/
 __pycache__/
 .env
 .venv/
 venv/
 *.pyc
+node_modules/
+dist/
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/

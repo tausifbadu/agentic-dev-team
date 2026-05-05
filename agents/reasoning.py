@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -140,6 +142,76 @@ def select_relevant_files(
     return picked
 
 
+def workspace_file_tree(root: Path, include_suffixes: set[str] | None = None) -> str:
+    """Return a flat listing of all source files in the workspace directory.
+
+    This is injected into agent prompts so the LLM knows exactly which
+    modules and files exist — preventing hallucinated imports.
+    """
+    if not root.exists():
+        return "(directory does not exist)"
+
+    lines: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in IGNORED_PARTS for part in path.parts):
+            continue
+        if include_suffixes and path.suffix.lower() not in include_suffixes:
+            if path.name not in {"requirements.txt", "package.json", "index.html",
+                                 "vite.config.js", "tailwind.config.js", "postcss.config.js"}:
+                continue
+        rel = path.relative_to(root)
+        lines.append(str(rel))
+
+    return "\n".join(lines) if lines else "(empty directory)"
+
+
+_PY_DEF_RE = re.compile(r'^(?:def|class|async def)\s+(\w+)', re.MULTILINE)
+_JS_EXPORT_RE = re.compile(
+    r'(?:^|\s)export\s+(?:default\s+)?(?:function|const|class|let|var)\s+(\w+)',
+    re.MULTILINE,
+)
+
+
+def workspace_export_map(root: Path, suffixes: set[str]) -> str:
+    """Scan workspace files and return a map of file -> exported symbols.
+
+    This prevents the LLM from rewriting a file and accidentally dropping
+    functions/classes that other files depend on.
+    """
+    if not root.exists():
+        return ""
+
+    lines: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in IGNORED_PARTS for part in path.parts):
+            continue
+        if path.suffix.lower() not in suffixes:
+            continue
+
+        rel = str(path.relative_to(root))
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        if path.suffix.lower() == ".py":
+            names = _PY_DEF_RE.findall(content)
+            public = [n for n in names if not n.startswith("_")]
+        else:
+            public = _JS_EXPORT_RE.findall(content)
+
+        if public:
+            lines.append(f"  {rel}: {', '.join(public)}")
+
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
 def render_context(root: Path, paths: list[Path]) -> str:
     """Render source file snippets for prompting."""
     sections = []
@@ -149,19 +221,210 @@ def render_context(root: Path, paths: list[Path]) -> str:
     return "\n".join(sections) if sections else "(empty workspace)"
 
 
+_COPY_IGNORE = shutil.ignore_patterns("node_modules", ".venv", "__pycache__", "dist")
+
+_BACKUPS_DIR = Path(__file__).parent.parent / "workspace" / ".backups"
+
+
+def backup_workspace(workspace_dir: Path, label: str = "") -> str:
+    """Create a timestamped backup of the workspace before an enhancement.
+
+    Returns the absolute path to the backup directory.
+    """
+    _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    tag = f"_{label}" if label else ""
+    backup_name = f"backup_{ts}{tag}"
+    backup_path = _BACKUPS_DIR / backup_name
+
+    for subdir_name in ("backend", "frontend"):
+        src = workspace_dir / subdir_name
+        if src.exists():
+            shutil.copytree(src, backup_path / subdir_name, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+
+    return str(backup_path)
+
+
+def restore_backup(backup_path: str, workspace_dir: Path) -> None:
+    """Restore a workspace from a previously created backup."""
+    bp = Path(backup_path)
+    if not bp.exists():
+        raise FileNotFoundError(f"Backup not found: {backup_path}")
+
+    for subdir_name in ("backend", "frontend"):
+        backup_sub = bp / subdir_name
+        dest_sub = workspace_dir / subdir_name
+        if backup_sub.exists():
+            if dest_sub.exists():
+                try:
+                    shutil.rmtree(dest_sub)
+                except OSError:
+                    pass
+            shutil.copytree(backup_sub, dest_sub, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+
+
+def list_backups() -> list[dict]:
+    """Return available backups sorted newest first."""
+    if not _BACKUPS_DIR.exists():
+        return []
+    result = []
+    for p in sorted(_BACKUPS_DIR.iterdir(), reverse=True):
+        if p.is_dir() and p.name.startswith("backup_"):
+            subdirs = [d.name for d in p.iterdir() if d.is_dir()]
+            result.append({"name": p.name, "path": str(p), "contents": subdirs})
+    return result
+
+
 def create_scratch_copy(source_dir: Path, prefix: str) -> Path:
-    """Create an isolated scratch copy for an agent attempt."""
+    """Create an isolated scratch copy for an agent attempt.
+
+    Skips node_modules, .venv, __pycache__, and dist since they are
+    regenerated during validation (npm install / pip install).
+    """
     scratch_root = Path(tempfile.mkdtemp(prefix=f"{prefix}_"))
     target = scratch_root / source_dir.name
     if source_dir.exists():
-        shutil.copytree(source_dir, target, dirs_exist_ok=True)
+        shutil.copytree(source_dir, target, dirs_exist_ok=True, ignore=_COPY_IGNORE)
     else:
         target.mkdir(parents=True, exist_ok=True)
     return target
 
 
 def promote_scratch_copy(scratch_dir: Path, destination_dir: Path) -> None:
-    """Replace destination with validated scratch output."""
+    """Replace destination with validated scratch output.
+
+    Skips node_modules/dist/etc. to keep the workspace lightweight.
+    Uses dirs_exist_ok to merge into an existing directory when rmtree
+    fails (e.g., locked files on macOS).
+    """
     if destination_dir.exists():
-        shutil.rmtree(destination_dir)
-    shutil.copytree(scratch_dir, destination_dir)
+        try:
+            shutil.rmtree(destination_dir)
+        except OSError:
+            pass
+    shutil.copytree(scratch_dir, destination_dir, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+
+
+_ROUTE_RE = re.compile(
+    r'@\w+\.(get|post|put|patch|delete)\(\s*["\']([^"\']+)["\']'
+    r'(?:.*?response_model\s*=\s*(\w+))?'
+    r'(?:.*?status_code\s*=\s*(\d+))?',
+    re.DOTALL,
+)
+_MODEL_CLASS_RE = re.compile(r'^class\s+(\w+)\(.*BaseModel.*\):', re.MULTILINE)
+_FIELD_RE = re.compile(r'^\s+(\w+)\s*:\s*(.+?)(?:\s*=.*)?$', re.MULTILINE)
+
+
+def extract_api_contract(backend_root: Path) -> dict:
+    """Scan backend Python files to extract a lightweight API route + model summary."""
+    contract: dict = {"routes": [], "models": []}
+    if not backend_root.exists():
+        return contract
+
+    for py_file in sorted(backend_root.rglob("*.py")):
+        if any(part in IGNORED_PARTS for part in py_file.parts):
+            continue
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        for m in _ROUTE_RE.finditer(content):
+            method = m.group(1).upper()
+            path = m.group(2)
+            resp_model = m.group(3) or ""
+            status_code = int(m.group(4)) if m.group(4) else (200 if method == "GET" else 201)
+            func_match = re.search(r'\ndef\s+(\w+)\s*\(', content[m.end():m.end() + 200])
+            func_name = func_match.group(1) if func_match else ""
+            contract["routes"].append({
+                "method": method,
+                "path": path,
+                "function": func_name,
+                "response_model": resp_model,
+                "status_code": status_code,
+                "file": str(py_file.relative_to(backend_root)),
+            })
+
+        for cm in _MODEL_CLASS_RE.finditer(content):
+            class_name = cm.group(1)
+            class_end = content.find("\nclass ", cm.end())
+            if class_end == -1:
+                class_end = len(content)
+            class_body = content[cm.end():class_end]
+            fields = {}
+            for fm in _FIELD_RE.finditer(class_body):
+                field_name = fm.group(1)
+                if field_name.startswith("_"):
+                    continue
+                field_type = fm.group(2).strip().rstrip(",")
+                fields[field_name] = field_type
+            if fields:
+                contract["models"].append({"name": class_name, "fields": fields})
+
+    return contract
+
+
+_SKIP_SECTIONS = {
+    "when to apply",
+    "how to use",
+    "how to use this skill",
+    "prerequisites",
+    "search reference",
+    "example workflow",
+    "output formats",
+    "tips for better results",
+}
+
+_MAX_SKILL_CHARS = 16000
+
+
+def load_skill_guidelines(skill_path: Path) -> str:
+    """Load a SKILL.md file and extract actionable guideline sections.
+
+    Strips YAML frontmatter and meta/instructional sections (how to use,
+    prerequisites, etc.), keeping all substantive engineering and design
+    guidelines. Truncates to _MAX_SKILL_CHARS to stay within prompt budgets.
+    """
+    if not skill_path.exists():
+        return ""
+    try:
+        raw = skill_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    lines = raw.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                start = i + 1
+                break
+
+    body = lines[start:]
+
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_lines: list[str] = []
+
+    for line in body:
+        match = re.match(r"^##\s+(.+)", line)
+        if match:
+            if current_heading:
+                sections.append((current_heading, current_lines))
+            current_heading = match.group(1).strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    if current_heading:
+        sections.append((current_heading, current_lines))
+
+    kept: list[str] = []
+    for heading, content in sections:
+        if heading.lower() not in _SKIP_SECTIONS:
+            kept.extend(content)
+
+    result = "\n".join(kept).strip()
+    if len(result) > _MAX_SKILL_CHARS:
+        result = result[:_MAX_SKILL_CHARS] + "\n... (truncated)"
+    return result

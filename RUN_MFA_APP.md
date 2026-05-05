@@ -1,123 +1,99 @@
-# Run MFA App
-
-This guide explains how to run and test the Multi Time Frame Analysis (MFA) app locally.
+# Agentic Dev Team — Run Guide
 
 ## Prerequisites
 
-- Python virtual environment created at `.venv`
+- Python 3.12+ virtual environment at `.venv`
 - Node.js and `npm` installed
-- Backend and frontend code already generated under `workspace/backend` and `workspace/frontend`
+- OpenAI API key in `.env`
 
 ## 1. Activate the Virtual Environment
 
-From the project root:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
+```bash
+cd /Users/tausifbadu/agentic-dev-team/agentic-dev-team
+source .venv/bin/activate
 ```
 
-## 2. Start the Backend
+## 2. Start the Dashboard Backend
 
-Open a terminal from the project root and run:
-
-```powershell
-cd .\workspace\backend
-python -m pip install -r requirements.txt
-python -m uvicorn main:app --reload
+```bash
+uvicorn dashboard.backend.app:app --reload \
+  --reload-dir agents --reload-dir dashboard \
+  --reload-dir schemas.py --reload-dir state_store.py
 ```
 
-Backend URLs:
+Dashboard API: `http://localhost:8000/api/health`
 
-- Health check: `http://127.0.0.1:8000/health`
-- Swagger docs: `http://127.0.0.1:8000/docs`
-- MFA endpoint example: `http://127.0.0.1:8000/mfa?symbol=RELIANCE.NS`
+## 3. Start the Dashboard Frontend
 
-## 3. Start the Frontend
+In a second terminal:
 
-Open a second terminal from the project root and run:
-
-```powershell
-cd .\workspace\frontend
+```bash
+cd dashboard/frontend
 npm install
 npm run dev
 ```
 
-Frontend URL:
+Dashboard UI: `http://localhost:5173`
 
-- `http://localhost:5173`
+## 4. Wipe DB and Workspace (Fresh Start)
 
-The frontend uses `VITE_BACKEND_URL` if set. Otherwise it defaults to `http://127.0.0.1:8000`.
+Stop the dashboard backend first, then:
 
-## 4. Manual MFA Test
-
-Open `http://localhost:5173` and test with a few NSE symbols:
-
-- `RELIANCE.NS`
-- `TCS.NS`
-- `INFY.NS`
-- `HDFCBANK.NS`
-
-Expected behavior:
-
-- The page shows a symbol input or selection.
-- Submitting a valid symbol loads MFA data from the backend.
-- The UI renders daily, monthly, and yearly MFA sections.
-- The MFA chart renders percent change by timeframe from backend `chart_data`.
-- A separate Momentum Structural Analysis (MSA) section appears below with:
-  - Cross-timeframe comparison bar chart (structure score or rate of change).
-  - Per-timeframe MSA cards with trend regime, structure state, momentum confirmation.
-  - Per-timeframe line charts showing close, support, resistance, and EMAs.
-- Loading, error, and no-data states appear when appropriate.
-
-## 5. Backend API Test
-
-From PowerShell:
-
-```powershell
-Invoke-RestMethod "http://127.0.0.1:8000/mfa?symbol=RELIANCE.NS"
+```bash
+rm -f state/state.db
+rm -rf workspace/frontend workspace/backend workspace/debug workspace/tests workspace/scope.json
 ```
 
-Try a few edge cases:
+Then restart the dashboard backend (step 2) so `init_db()` recreates the tables.
 
-```powershell
-Invoke-RestMethod "http://127.0.0.1:8000/mfa?symbol=RELIANCE"
-Invoke-RestMethod "http://127.0.0.1:8000/mfa?symbol=@@@.NS"
+## 5. Run the Generated App
+
+After agents finish building, start the generated app:
+
+**Backend** (terminal 3):
+
+```bash
+cd workspace/backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8001
 ```
 
-Expected results:
+**Frontend** (terminal 4):
 
-- Valid symbol returns MFA JSON with `analyses`, `chart_data`, `momentum_structures`, `structure_chart_data`, and per-timeframe `*_structure_series`.
-- Missing `.NS` suffix returns a `400` error.
-- Invalid symbol format returns a controlled error response.
+```bash
+cd workspace/frontend
+npm install
+npm run dev
+```
 
-## 6. Run Automated Backend Tests
+Generated app: `http://localhost:5173` (or next available port)
+Generated API: `http://localhost:8001/docs`
 
-From the project root (with venv activated):
+## 6. Environment Variables
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pytest workspace/backend/tests
+`.env` file in project root:
+
+```
+OPENAI_API_KEY=sk-...
+PM_AGENT_MODEL=gpt-4o-mini
+BACKEND_AGENT_MODEL=gpt-5.3-codex
+FRONTEND_AGENT_MODEL=gpt-5.3-codex
+TEST_AGENT_MODEL=gpt-4o-mini
 ```
 
 ## 7. Common Issues
 
-If the frontend is blank:
+| Problem | Fix |
+|---|---|
+| `Address already in use` | `lsof -ti :8000 \| xargs kill -9` |
+| Agent stuck at "Planning..." | Restart uvicorn; check `--reload-dir` flags |
+| `npm: command not found` | `brew install node` |
+| `uvicorn: command not found` | Activate the venv first: `source .venv/bin/activate` |
+| Frontend can't reach backend | Check CORS middleware and Vite proxy config |
+| Workspace venv gone after fix | Recreate: `cd workspace/backend && python3 -m venv .venv` |
 
-- Check the browser console for JavaScript errors.
-- Confirm the backend is running on `http://127.0.0.1:8000`.
-- Confirm the frontend terminal shows Vite is serving on `http://localhost:5173`.
+## 8. Stop Everything
 
-If the frontend cannot call the backend:
-
-- Make sure `workspace/backend/main.py` is running.
-- Check that CORS is enabled for `http://localhost:5173`.
-
-If a symbol fails:
-
-- Use NSE symbols with the `.NS` suffix.
-- Try one of the example symbols first.
-
-## 8. Stop the App
-
-- In the backend terminal, press `Ctrl+C`
-- In the frontend terminal, press `Ctrl+C`
+Press `Ctrl+C` in each terminal.

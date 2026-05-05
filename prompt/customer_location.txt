@@ -1,0 +1,117 @@
+Build a Customer Location Registration Web Application (Phase 1)
+
+Overview:
+A single-page web application where customers can submit their name along with their
+current location. The browser's Geolocation API should automatically detect the user's
+coordinates (latitude/longitude), and the backend should resolve those coordinates into
+a human-readable address (country, city, region) using reverse geocoding.
+
+Backend (Python FastAPI):
+- POST /api/customers — accepts customer name, latitude, longitude. The backend
+  performs reverse geocoding to resolve country, city, and region from the coordinates.
+  Store the full record (name, latitude, longitude, country, city, region, submitted_at)
+  in an SQLite database. Return the created customer record with all resolved fields.
+- GET /api/customers — returns a paginated list of all submitted customers with their
+  name, coordinates, country, city, region, and submission timestamp. Support optional
+  query parameters: ?page=1&limit=10 and ?search=name_fragment.
+- GET /api/customers/{id} — returns a single customer record by ID.
+- Use the `geopy` library with the Nominatim geocoder for reverse geocoding
+  (free, no API key required). Set a descriptive user_agent string.
+- Use Pydantic models for request/response validation.
+- Include proper error handling: 400 if coordinates are missing or out of range
+  (lat: -90 to 90, lng: -180 to 180), 404 if customer not found, 500 if geocoding
+  service is unavailable (store coordinates anyway with country/city as "Unknown").
+- Add CORS middleware allowing all origins for local development.
+
+Frontend (React.js) — Dark Mode, Modern Premium Design:
+
+DESIGN PHILOSOPHY: Build a visually stunning, premium SaaS-quality dark mode UI.
+The app should feel polished, spacious, and modern — not like a basic CRUD form.
+Think: Vercel dashboard, Linear app, or Raycast-level design quality.
+
+Brand Color Palette:
+  - Primary: Battery Charged Blue (#14BCD9) — primary buttons, links, active states,
+    focus rings, interactive elements, gradient accents.
+  - Secondary: Medium Electric Blue (#005986) — secondary buttons, card accents,
+    hover states, subtle background tints.
+  - Accent/Success: Apple Green (#50BB40) — success toasts, location detected
+    confirmations, status indicators, positive feedback.
+  - Error: Soft red (#EF4444) for error states and destructive actions.
+
+Dark Theme Surfaces (layered depth system):
+  - Page background: near-black (#030712 or gray-950).
+  - Cards/panels: glassmorphism style — bg-white/[0.04] with backdrop-blur-xl,
+    border border-white/[0.08], rounded-2xl. This creates a frosted-glass depth effect.
+  - Elevated surfaces on hover: bg-white/[0.07] with border-white/[0.12] and
+    shadow-xl shadow-black/20 for lift effect.
+  - Text: white for headings (font-bold tracking-tight), gray-300 for body text,
+    gray-500 for muted/secondary text.
+
+Modern UI Components:
+  - Use the pre-built Tailwind component classes from styles.css: .glass-card,
+    .glass-card-hover, .btn-primary, .btn-secondary, .btn-ghost, .input-field,
+    .badge-success, .badge-error, .badge-info, .toast, .skeleton, .section-header,
+    .gradient-text.
+  - Buttons: rounded-xl with generous padding (px-6 py-3), font-semibold, shadow-lg,
+    active:scale-[0.98] press effect, hover:brightness-110.
+  - Inputs: bg-white/5 with border-white/10, rounded-xl, focus ring in brand-primary.
+  - Use inline SVG icons (Heroicons style) for all buttons and status indicators.
+    NEVER use emoji as icons.
+
+Layout & Spacing:
+  - Two-column layout on desktop (form on left, customer list on right) using
+    CSS grid: grid-cols-1 lg:grid-cols-5 with the form taking 2 cols and list 3 cols.
+  - Stat cards row at the top showing total customers, current page, location status.
+  - Generous spacing: p-6 on cards, gap-8 between sections, py-8 on main content.
+  - Max-width container (max-w-6xl mx-auto) for comfortable reading width.
+  - Header bar with gradient brand icon and app title.
+
+Animations & Micro-interactions:
+  - Page entrance: animate-fadeIn on cards with staggered animationDelay (0.1s, 0.2s).
+  - List items: animate-fadeIn with staggered delay per item (idx * 0.05s).
+  - Toast notifications: animate-slideDown, glassmorphism style, auto-dismiss in 4s,
+    with close button.
+  - Location detection: animate-pulse on the detect button while loading, animated
+    green dot indicator when coordinates are confirmed.
+  - Skeleton loading: shimmer animation (gradient sweep) for placeholder cards while
+    data is loading — NOT plain "Loading..." text.
+  - Button press: active:scale-[0.98] for tactile feedback.
+  - Hover states: smooth transitions (transition-all duration-200 or duration-300).
+
+Registration Form:
+  - Text input for customer name (required, min 2 characters) using .input-field class.
+  - "Detect My Location" button with SVG map-pin icon and spinner icon while detecting.
+  - Display detected coordinates in a green-tinted pill (bg-green-500/10 border
+    border-green-500/20) with a pulsing green dot and coordinate text.
+  - Inline error banners with SVG warning icon, red-tinted background (bg-red-500/10),
+    rounded-xl.
+  - Submit button using .btn-primary with SVG check icon.
+
+Customer List:
+  - Each customer displayed as a .glass-card-hover with user avatar icon (gradient
+    bg from brand-primary/20 to brand-secondary/20), name in bold white, location
+    with map-pin icon, and muted coordinate/date line.
+  - Search input with embedded SVG search icon (positioned left with pl-10).
+  - Customer count badge next to section header using .badge-info.
+  - Pagination: ghost-style buttons with chevron icons, "Page X of Y" text.
+  - Empty state: centered large icon (gray-600), "No customers yet" heading,
+    helpful subtitle text.
+  - Error state: centered warning icon with retry button.
+
+Responsive Design:
+  - Mobile: single column, full-width cards, comfortable touch targets (min 44px).
+  - Desktop: two-column grid layout.
+  - Breakpoint: lg (1024px) for column switch.
+
+Technical:
+  - Use Tailwind CSS utility classes (project already has Tailwind configured with
+    brand-primary, brand-secondary, brand-accent color tokens).
+  - Fetch data from the backend API using relative URLs (/api/customers).
+    The Vite dev server proxy is already configured to forward /api to the backend.
+
+Technical Constraints:
+- Backend: Python 3.9+, FastAPI, SQLite, geopy (Nominatim), Pydantic. Use Optional[X] from typing instead of X | None syntax.
+- Frontend: React 18+, Vite, Tailwind CSS.
+- No authentication required for Phase 1.
+- All data stored in a single SQLite database file.
+- The application must run on localhost for development.

@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Agentic Dev Team v0. Requirement -> PM -> Review -> Frontend/Backend Agents."""
+"""Agentic Dev Team v1. Requirement -> PM -> Review -> Frontend/Backend/Test Agents."""
 
 import sys
 import uuid
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 
 from schemas import Requirement, StoryPack
 from state_store import requirement_path, save, storypack_path
 from agents.pm_agent import create_stories
 from agents.backend_agent import implement_backend
 from agents.frontend_agent import implement_frontend
+from agents.test_agent import implement_tests
+
+PROMPT_DIR = Path(__file__).parent / "prompt"
 
 
 def _run_frontend(stories, pack: StoryPack):
@@ -45,12 +53,66 @@ def _run_backend(stories, pack: StoryPack):
     return True
 
 
-def main():
+def _run_tests(pack: StoryPack):
+    print("\nGenerating and running tests...")
+    ok, msg = implement_tests(pack.stories, pack.requirement_text)
+    if ok:
+        print(f"  Tests: {msg}")
+    else:
+        print(f"  Tests: FAILED")
+        print(msg)
+    return ok
+
+
+def _resolve_requirement_text() -> str:
+    """Parse CLI args and return the requirement text.
+
+    Supported modes:
+      python main.py "inline requirement text"
+      python main.py --file prompt/webhook.txt
+      python main.py --file webhook          (auto-resolves from prompt/ dir)
+      python main.py --list                  (list available prompt files)
+    """
     if len(sys.argv) < 2:
-        print("Usage: python main.py \"Your requirement here\"")
+        print("Usage:")
+        print('  python main.py "Your requirement here"')
+        print("  python main.py --file prompt/webhook.txt")
+        print("  python main.py --file webhook")
+        print("  python main.py --list")
         sys.exit(1)
 
-    text = " ".join(sys.argv[1:])
+    if sys.argv[1] == "--list":
+        files = sorted(PROMPT_DIR.glob("*.txt")) if PROMPT_DIR.exists() else []
+        if not files:
+            print("No prompt files found in prompt/")
+        else:
+            print("Available prompt files:")
+            for f in files:
+                first_line = f.read_text(encoding="utf-8").split("\n", 1)[0].strip()
+                print(f"  {f.stem:<20} {first_line[:60]}")
+        sys.exit(0)
+
+    if sys.argv[1] == "--file":
+        if len(sys.argv) < 3:
+            print("Error: --file requires a path argument.")
+            sys.exit(1)
+        file_arg = sys.argv[2]
+        path = Path(file_arg)
+        if not path.exists():
+            path = PROMPT_DIR / f"{file_arg}.txt"
+        if not path.exists():
+            path = PROMPT_DIR / file_arg
+        if not path.exists():
+            print(f"Error: file not found: {file_arg}")
+            print("Run 'python main.py --list' to see available prompt files.")
+            sys.exit(1)
+        return path.read_text(encoding="utf-8").strip()
+
+    return " ".join(sys.argv[1:])
+
+
+def main():
+    text = _resolve_requirement_text()
     req_id = f"req_{uuid.uuid4().hex[:8]}"
 
     req = Requirement(id=req_id, text=text)
@@ -62,7 +124,8 @@ def main():
 
     print("\n" + "=" * 60 + "\nSTORIES FOR REVIEW\n" + "=" * 60)
     for s in pack.stories:
-        print(f"\n[{s.id}] {s.title} ({s.ownership})")
+        deps = f" deps={s.dependencies}" if s.dependencies else ""
+        print(f"\n[{s.id}] {s.title} ({s.ownership}){deps}")
         print(f"  {s.description}")
         for ac in s.acceptance_criteria:
             print(f"  - {ac}")
@@ -83,18 +146,16 @@ def main():
     pack.status = "approved"
     save(storypack_path(pack.id), pack.model_dump())
 
-    frontend_stories = [s for s in pack.stories if s.ownership == "frontend"]
     backend_stories = [s for s in pack.stories if s.ownership == "backend"]
+    frontend_stories = [s for s in pack.stories if s.ownership == "frontend"]
 
-    if not frontend_stories and not backend_stories:
-        print("No stories to implement. Done.")
-        return
+    if not _run_backend(backend_stories, pack):
+        sys.exit(1)
 
     if not _run_frontend(frontend_stories, pack):
         sys.exit(1)
 
-    if not _run_backend(backend_stories, pack):
-        sys.exit(1)
+    _run_tests(pack)
 
     print("\nDone.")
 

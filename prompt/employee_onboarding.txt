@@ -1,0 +1,70 @@
+Build an Employee Onboarding Portal — a simple web app where HR can add new hires and track their onboarding status.
+
+Business Context:
+HR needs a dashboard to add employees and mark their onboarding as complete or flagged.
+
+Data Model:
+Employee:
+  - id (uuid, auto-generated)
+  - name (string, required)
+  - email (string, required, unique)
+  - department (string, required)
+  - status (not_started | in_progress | completed | flagged, default not_started)
+  - created_at (ISO datetime)
+
+IMPORTANT: The PM agent MUST produce exactly 6 stories — 2 backend, 2 frontend, 2 testing. No more, no less.
+
+Backend Stories (2 stories):
+
+Story 1 — Employee CRUD API:
+  - POST /api/employees — create employee. Body: { name, email, department }. Returns created employee with id. 409 on duplicate email.
+  - GET /api/employees — list all employees. Optional query param ?status=in_progress to filter.
+  - GET /api/employees/{id} — get single employee. 404 if not found.
+  - PUT /api/employees/{id} — update employee status. Body: { status }. Validate status value. Returns updated employee.
+
+Story 2 — Stats API & Error Handling:
+  - GET /api/stats — return { total, completed, in_progress, flagged, not_started } counts.
+  - Consistent error responses: { detail: "message" } for 400, 404, 409.
+  - Use Pydantic models for all schemas. Store data in-memory (dict). FastAPI with Python.
+
+Frontend Stories (2 stories):
+
+Story 1 — Dashboard Page:
+  - Show 4 stat cards: Total, Completed, In Progress, Flagged (from GET /api/stats).
+  - Show employee table with columns: name, email, department, status.
+  - "Add Employee" button opens a modal with fields: name, email, department (dropdown: Engineering, Product, Design, HR, Finance). Submit calls POST /api/employees.
+  - Dark theme. The Frontend Agent has access to SKILL_UI.md design guidelines — follow them.
+
+Story 2 — Employee Detail & Status Update:
+  - Clicking an employee row navigates to /employees/{id}.
+  - Show employee info and a status dropdown (not_started, in_progress, completed, flagged).
+  - "Save" button calls PUT /api/employees/{id}. Show success/error feedback inline.
+  - "Back to Dashboard" link. Dark theme per SKILL_UI.md guidelines.
+
+Testing Stories (2 stories):
+
+Story 1 — Backend API Tests:
+  - Test create employee returns correct fields.
+  - Test duplicate email returns 409.
+  - Test list employees and filter by status.
+  - Test get employee by id, 404 for unknown id.
+  - Use FastAPI TestClient. pytest.
+
+Story 2 — Stats & Update Tests:
+  - Test stats endpoint returns correct counts after creating employees.
+  - Test update employee status changes correctly.
+  - Test invalid status value returns 400.
+  - Use FastAPI TestClient. pytest.
+
+Visual direction:
+  - Dark theme only. Deep dark backgrounds, elevated dark cards, subtle borders.
+  - Smooth transitions (150-200ms) on interactive elements.
+  - Status badges color-coded with semi-transparent backgrounds.
+  - The Frontend Agent will apply design rules from its SKILL_UI.md guidelines.
+
+Important Constraints:
+- No authentication required
+- No database — in-memory dict storage
+- No external API calls — self-contained
+- React frontend, FastAPI backend
+- All API calls from frontend go to same host
