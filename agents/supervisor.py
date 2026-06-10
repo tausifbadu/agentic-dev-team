@@ -21,6 +21,7 @@ This file is the thinnest possible orchestration shim — the heavy lifting
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -53,6 +54,11 @@ class SupervisorConfig:
     max_total_tool_calls: int = 600
     run_tests: bool = True
     run_smoke: bool = True
+    # Acceptance-criteria verification: after an agent passes its DoD gate, an
+    # independent reviewer checks the artifact against the story's acceptance
+    # criteria. Unmet criteria are fed back for up to `max_verify_retries` retries.
+    verify_acceptance: bool = True
+    max_verify_retries: int = 1
 
 
 @dataclass
@@ -289,6 +295,14 @@ class Supervisor:
         outcome.iterations = result.iterations
         outcome.tool_calls = result.tool_calls
 
+        # ---- Acceptance-criteria verification gate ----
+        # The agent's DoD gate proved the artifact RUNS. This independent pass
+        # proves it SATISFIES the story. Unmet criteria are fed back for a bounded
+        # retry; if still unmet, `result` becomes a failure and falls through to
+        # the normal story.failed / PM-rescope path below.
+        if result.success:
+            result = self._verify_and_heal(agent, story, result, outcome)
+
         if result.success:
             outcome.status = "passed"
             outcome.summary = result.summary
@@ -449,6 +463,97 @@ class Supervisor:
         )
         self.outcomes[story.id] = outcome
         self._log("supervisor", "info", f"Skipped {story.title}: {reason}")
+
+    # ---------- Acceptance-criteria verification ----------
+
+    def _verification_enabled(self) -> bool:
+        if not self.config.verify_acceptance:
+            return False
+        return os.getenv("AGENTIC_VERIFY_ACCEPTANCE", "1").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+
+    def _verify_and_heal(
+        self, agent: AgentBase, story: Story, result: RunResult, outcome: StoryOutcome
+    ) -> RunResult:
+        """Verify the artifact against acceptance criteria; feed unmet criteria back
+        to the agent for up to `max_verify_retries` retries. Returns a successful
+        RunResult if criteria are met, or a failure RunResult (which the caller
+        routes through the normal failure/rescope path)."""
+        if not self._verification_enabled() or not (story.acceptance_criteria or []):
+            return result
+
+        attempts = 0
+        while True:
+            verdict = self._verify_story(agent, story)
+            if verdict is None:
+                # Verifier unavailable/crashed — do not block the agent's own pass.
+                return result
+            if verdict.get("all_met"):
+                self._log("verifier", "info",
+                          f"Acceptance check PASSED for {story.title} "
+                          f"({len(verdict.get('criteria', []))} criteria).")
+                return result
+
+            unmet = verdict.get("unmet", [])
+            unmet_titles = "; ".join(c.get("criterion", "")[:80] for c in unmet)
+            self._log("verifier", "error",
+                      f"Acceptance check found {len(unmet)} unmet criteria for {story.title}",
+                      unmet_titles)
+            self.bus.publish(
+                topic="acceptance.failed",
+                from_agent="verifier",
+                payload={"story_id": story.id, "unmet": unmet},
+                story_id=story.id,
+                summary=f"{len(unmet)} acceptance criteria unmet: {unmet_titles[:140]}",
+            )
+
+            if attempts >= self.config.max_verify_retries or self._budget_exceeded():
+                return RunResult(
+                    success=False,
+                    summary=(
+                        f"Acceptance criteria not met after verification: {unmet_titles}"
+                    ),
+                    iterations=result.iterations,
+                    tool_calls=result.tool_calls,
+                    metadata=result.metadata,
+                )
+
+            attempts += 1
+            self._log("supervisor", "info",
+                      f"Re-running {story.title} with verification feedback "
+                      f"(verify attempt {attempts}/{self.config.max_verify_retries}).")
+            retry = agent.run(self._with_ac_feedback(story, unmet))
+            outcome.iterations += retry.iterations
+            outcome.tool_calls += retry.tool_calls
+            if not retry.success:
+                return retry  # agent failed on retry — route to failure path
+            result = retry  # loop re-verifies the new artifact
+
+    def _verify_story(self, agent: AgentBase, story: Story) -> Optional[dict]:
+        from agents.verifier import verify_story_acceptance
+        try:
+            return verify_story_acceptance(
+                story=story,
+                workspace_dir=self.workspace_dir,
+                client=agent.client,
+                model=os.getenv("VERIFIER_MODEL", agent.model),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log("verifier", "error", f"Verifier crashed for {story.title}: {exc}")
+            return None
+
+    def _with_ac_feedback(self, story: Story, unmet: list[dict]) -> Story:
+        """Return a copy of the story with the unmet criteria appended as explicit
+        implementation notes so the agent's next attempt targets the gaps."""
+        notes = list(story.implementation_notes) + [
+            "VERIFICATION FEEDBACK — an independent reviewer judged these acceptance "
+            "criteria UNMET. Implement them specifically and re-validate before finishing:",
+        ] + [
+            f"UNMET: {c.get('criterion', '')} (reviewer: {c.get('evidence', '')[:160]})"
+            for c in unmet
+        ]
+        return Story(**{**story.model_dump(), "implementation_notes": notes})
 
     def _abort_remaining(self, stories: list[Story], reason: str) -> None:
         """Record stories that never ran (budget/halt) as failures, so they are
