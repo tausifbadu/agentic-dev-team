@@ -8,6 +8,7 @@ import DebugPanel from "./pages/DebugPanel";
 import AgentComms from "./pages/AgentComms";
 import Enhancements from "./pages/Enhancements";
 import LiveConsole from "./pages/LiveConsole";
+import WorkspaceChat from "./pages/WorkspaceChat";
 
 const navItems = [
   { to: "/", label: "Requirements", icon: IconReq },
@@ -16,6 +17,7 @@ const navItems = [
   { to: "/comms", label: "Comms", icon: IconComms },
   { to: "/tests", label: "Tests", icon: IconTest },
   { to: "/workspace", label: "Workspace", icon: IconCode },
+  { to: "/workspace-chat", label: "WS Chat", icon: IconChat },
   { to: "/enhance", label: "Enhance", icon: IconEnhance },
   { to: "/debug", label: "Debug", icon: IconDebug },
 ];
@@ -69,6 +71,7 @@ export default function App() {
             <Route path="/agents" element={<AgentMonitor />} />
             <Route path="/tests" element={<TestResults />} />
             <Route path="/workspace" element={<Workspace />} />
+            <Route path="/workspace-chat" element={<WorkspaceChat />} />
             <Route path="/comms" element={<AgentComms />} />
             <Route path="/enhance" element={<Enhancements />} />
             <Route path="/live" element={<LiveConsole />} />
@@ -159,6 +162,17 @@ function IconDebug() {
       <line x1="5.5" y1="9" x2="10.5" y2="9" />
       <line x1="5.5" y1="7" x2="10.5" y2="7" />
       <line x1="5.5" y1="11" x2="10.5" y2="11" />
+    </svg>
+  );
+}
+
+function IconChat() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 13V5a2 2 0 012-2h8a2 2 0 012 2v5a2 2 0 01-2 2H8l-5 4v-6z" />
+      <circle cx="6" cy="7" r=".5" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="7" r=".5" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="7" r=".5" fill="currentColor" stroke="none" />
     </svg>
   );
 }

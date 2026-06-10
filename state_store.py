@@ -139,6 +139,32 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_pack ON tool_calls(storypack_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_story ON tool_calls(story_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_to ON agent_inbox(to_agent, status);
 CREATE INDEX IF NOT EXISTS idx_inbox_correlation ON agent_inbox(correlation_id);
+
+CREATE TABLE IF NOT EXISTS workspace_chat_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspace_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_chat_msg_session ON workspace_chat_messages(session_id, id);
+
+CREATE TABLE IF NOT EXISTS workspace_chat_edits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    summary TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -763,6 +789,84 @@ def list_inbox_messages(to_agent: str | None = None, run_id: str | None = None,
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- Workspace chat (dashboard copilot) ---
+
+def save_workspace_chat_session(session_id: str, project_id: str) -> None:
+    conn = _get_conn()
+    now = _now_iso()
+    row = conn.execute("SELECT id FROM workspace_chat_sessions WHERE id = ?", (session_id,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE workspace_chat_sessions SET project_id = ?, updated_at = ? WHERE id = ?",
+            (project_id, now, session_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO workspace_chat_sessions (id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (session_id, project_id, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def touch_workspace_chat_session(session_id: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE workspace_chat_sessions SET updated_at = ? WHERE id = ?",
+        (_now_iso(), session_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_workspace_chat_message(session_id: str, role: str, content: str) -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO workspace_chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (session_id, role, content, _now_iso()),
+    )
+    mid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return mid
+
+
+def list_workspace_chat_messages(session_id: str, limit: int = 40) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM workspace_chat_messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_workspace_chat_edit(session_id: str, project_id: str, path: str, summary: str = "") -> None:
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO workspace_chat_edits (session_id, project_id, path, summary, created_at) VALUES (?, ?, ?, ?, ?)",
+        (session_id, project_id, path, summary[:2000], _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_workspace_chat_edits(session_id: str | None = None, limit: int = 50) -> list[dict]:
+    conn = _get_conn()
+    if session_id:
+        rows = conn.execute(
+            "SELECT * FROM workspace_chat_edits WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM workspace_chat_edits ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

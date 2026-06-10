@@ -156,4 +156,31 @@ export const api = {
 
   rollbackEnhancement: (id) =>
     request(`/enhancements/${id}/rollback`, { method: "POST" }),
+
+  createWorkspaceChatSession: (project_id = "default") =>
+    request("/workspace-chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ project_id: project_id || "default" }),
+    }),
+
+  /** Returns raw fetch Response (NDJSON stream); caller reads body. */
+  postWorkspaceChatStream: ({ session_id, project_id, message, allow_writes }) =>
+    fetch(`${BASE}/workspace-chat/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id,
+        project_id: project_id || "default",
+        message,
+        allow_writes: !!allow_writes,
+      }),
+    }),
+
+  listWorkspaceChatEdits: (sessionId, limit = 40) => {
+    const q = new URLSearchParams();
+    if (sessionId) q.set("session_id", sessionId);
+    if (limit) q.set("limit", String(limit));
+    const qs = q.toString();
+    return request(`/workspace-chat/edits${qs ? `?${qs}` : ""}`);
+  },
 };

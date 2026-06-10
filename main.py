@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Agentic Dev Team v1. Requirement -> PM -> Review -> Frontend/Backend/Test Agents."""
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -10,13 +11,31 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 from schemas import Requirement, StoryPack
+import state_store
 from state_store import requirement_path, save, storypack_path
 from agents.pm_agent import create_stories
 from agents.backend_agent import implement_backend
 from agents.frontend_agent import implement_frontend
 from agents.test_agent import implement_tests
+from workspace_paths import resolve_workspace_dir
 
 PROMPT_DIR = Path(__file__).parent / "prompt"
+
+
+def _use_legacy_cli() -> bool:
+    """Match dashboard: USE_LEGACY_PIPELINE=1 forces legacy; CLI also accepts --legacy."""
+    if os.getenv("USE_LEGACY_PIPELINE", "0").strip().lower() in ("1", "true", "yes"):
+        return True
+    return "--legacy" in sys.argv
+
+
+def _strip_legacy_flag_from_argv() -> None:
+    if "--legacy" in sys.argv:
+        sys.argv = [a for a in sys.argv if a != "--legacy"]
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def _run_frontend(stories, pack: StoryPack):
@@ -59,7 +78,7 @@ def _run_tests(pack: StoryPack):
     if ok:
         print(f"  Tests: {msg}")
     else:
-        print(f"  Tests: FAILED")
+        print("  Tests: FAILED")
         print(msg)
     return ok
 
@@ -79,6 +98,9 @@ def _resolve_requirement_text() -> str:
         print("  python main.py --file prompt/webhook.txt")
         print("  python main.py --file webhook")
         print("  python main.py --list")
+        print("\nRuntime (after story approval):")
+        print("  Default: Supervisor + ReAct + tools (same as dashboard).")
+        print("  Legacy:  USE_LEGACY_PIPELINE=1  or  python main.py --legacy ...")
         sys.exit(1)
 
     if sys.argv[1] == "--list":
@@ -111,7 +133,73 @@ def _resolve_requirement_text() -> str:
     return " ".join(sys.argv[1:])
 
 
+def _run_via_supervisor(pack: StoryPack) -> bool:
+    """Agentic runtime: same Supervisor path as the dashboard (default)."""
+    from agents.supervisor import Supervisor, SupervisorConfig
+
+    workspace_dir = resolve_workspace_dir("default")
+
+    fast_track = _env_truthy("AGENTIC_FAST_TRACK")
+
+    def _on_progress(agent_id: str, level: str, message: str, detail=None):
+        print(f"[{agent_id}] {message}", flush=True)
+        if detail:
+            d = detail.strip()
+            if len(d) > 800:
+                d = d[:800] + "…"
+            print(d, flush=True)
+
+    print(
+        "\nUsing agentic runtime (Supervisor + ReAct + tools). "
+        f"Workspace: {workspace_dir}\n",
+        flush=True,
+    )
+
+    supervisor = Supervisor(
+        storypack_id=pack.id,
+        requirement_text=pack.requirement_text,
+        stories=list(pack.stories),
+        workspace_dir=workspace_dir,
+        config=SupervisorConfig(
+            run_tests=not fast_track,
+            run_smoke=not fast_track,
+        ),
+        on_progress=_on_progress,
+        all_stories=list(pack.stories),
+    )
+    result = supervisor.run()
+
+    print(result.summary, flush=True)
+    return result.success
+
+
+def _run_legacy_pipeline(pack: StoryPack) -> bool:
+    """Original plan-and-patch orchestration (USE_LEGACY_PIPELINE or --legacy)."""
+    print("\nUsing LEGACY runtime (plan → JSON patch per story).\n", flush=True)
+
+    state_store.update_storypack_status(pack.id, "in_progress")
+
+    backend_stories = [s for s in pack.stories if s.ownership == "backend"]
+    frontend_stories = [s for s in pack.stories if s.ownership == "frontend"]
+
+    ok = True
+    if not _run_backend(backend_stories, pack):
+        ok = False
+    elif not _run_frontend(frontend_stories, pack):
+        ok = False
+    elif not _run_tests(pack):
+        ok = False
+
+    state_store.update_storypack_status(pack.id, "completed" if ok else "failed")
+    pack.status = "completed" if ok else "failed"
+    save(storypack_path(pack.id), pack.model_dump())
+    return ok
+
+
 def main():
+    use_legacy = _use_legacy_cli()
+    _strip_legacy_flag_from_argv()
+
     text = _resolve_requirement_text()
     req_id = f"req_{uuid.uuid4().hex[:8]}"
 
@@ -146,17 +234,20 @@ def main():
     pack.status = "approved"
     save(storypack_path(pack.id), pack.model_dump())
 
-    backend_stories = [s for s in pack.stories if s.ownership == "backend"]
-    frontend_stories = [s for s in pack.stories if s.ownership == "frontend"]
+    if use_legacy:
+        if not _run_legacy_pipeline(pack):
+            sys.exit(1)
+        print("\nDone.")
+        return
 
-    if not _run_backend(backend_stories, pack):
+    state_store.update_storypack_status(pack.id, "in_progress")
+    success = _run_via_supervisor(pack)
+    state_store.update_storypack_status(pack.id, "completed" if success else "failed")
+    pack.status = "completed" if success else "failed"
+    save(storypack_path(pack.id), pack.model_dump())
+
+    if not success:
         sys.exit(1)
-
-    if not _run_frontend(frontend_stories, pack):
-        sys.exit(1)
-
-    _run_tests(pack)
-
     print("\nDone.")
 
 

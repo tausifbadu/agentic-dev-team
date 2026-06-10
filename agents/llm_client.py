@@ -39,6 +39,13 @@ def is_responses_model(model_name: str) -> bool:
     return _model_api(model_name) == "responses"
 
 
+def _temperature_unsupported_error(err: str) -> bool:
+    e = err.lower()
+    return "temperature" in e and (
+        "unsupported" in e or "only the default" in e or "default (1)" in e
+    )
+
+
 def _chat_completions_create(
     client: OpenAI,
     *,
@@ -46,22 +53,33 @@ def _chat_completions_create(
     max_tokens: int,
     **kwargs: Any,
 ):
-    """Call ``chat.completions.create``. Newer OpenAI models reject ``max_tokens`` and
-    require ``max_completion_tokens`` instead — retry on that error.
+    """Call ``chat.completions.create``. Retries when the model rejects ``max_tokens``
+    (use ``max_completion_tokens``) or custom ``temperature`` (omit param; API default only).
     """
-    try:
-        return client.chat.completions.create(
-            model=model, max_tokens=max_tokens, **kwargs
-        )
-    except BadRequestError as exc:
-        err = str(exc).lower()
-        if "max_completion_tokens" in err or (
-            "max_tokens" in err and "unsupported" in err
-        ):
+    use_mc = False
+    omit_temp = False
+    while True:
+        call_kw = {k: v for k, v in kwargs.items() if not (omit_temp and k == "temperature")}
+        try:
+            if use_mc:
+                return client.chat.completions.create(
+                    model=model, max_completion_tokens=max_tokens, **call_kw
+                )
             return client.chat.completions.create(
-                model=model, max_completion_tokens=max_tokens, **kwargs
+                model=model, max_tokens=max_tokens, **call_kw
             )
-        raise
+        except BadRequestError as exc:
+            err = str(exc).lower()
+            if not use_mc and (
+                "max_completion_tokens" in err
+                or ("max_tokens" in err and "unsupported" in err)
+            ):
+                use_mc = True
+                continue
+            if not omit_temp and _temperature_unsupported_error(str(exc)):
+                omit_temp = True
+                continue
+            raise
 
 
 def _extract_json(text: str) -> str:
@@ -90,22 +108,43 @@ def call_llm_text(
     api = _model_api(model)
 
     if api == "responses":
-        response = client.responses.create(
-            model=model,
-            instructions=system_prompt,
-            input=user_prompt,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        )
+        try:
+            response = client.responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=user_prompt,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        except BadRequestError as exc:
+            if _temperature_unsupported_error(str(exc)):
+                response = client.responses.create(
+                    model=model,
+                    instructions=system_prompt,
+                    input=user_prompt,
+                    max_output_tokens=max_tokens,
+                )
+            else:
+                raise
         return (response.output_text or "").strip()
 
     if api == "completions":
-        response = client.completions.create(
-            model=model,
-            prompt=f"{system_prompt}\n\n{user_prompt}",
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = client.completions.create(
+                model=model,
+                prompt=f"{system_prompt}\n\n{user_prompt}",
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except BadRequestError as exc:
+            if _temperature_unsupported_error(str(exc)):
+                response = client.completions.create(
+                    model=model,
+                    prompt=f"{system_prompt}\n\n{user_prompt}",
+                    max_tokens=max_tokens,
+                )
+            else:
+                raise
         return (response.choices[0].text or "").strip()
 
     response = _chat_completions_create(
@@ -193,12 +232,21 @@ Respond with valid JSON only. No markdown fences. No commentary."""
 
     errors: list[str] = []
     for _ in range(max_retries + 1):
-        response = client.completions.create(
-            model=model,
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = client.completions.create(
+                model=model,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except BadRequestError as exc:
+            if not _temperature_unsupported_error(str(exc)):
+                raise
+            response = client.completions.create(
+                model=model,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
         content = (response.choices[0].text or "").strip()
         extracted = _extract_json(content)
         try:
@@ -221,14 +269,25 @@ def _call_responses_json(
     ]
     errors: list[str] = []
     for _ in range(max_retries + 1):
-        response = client.responses.create(
-            model=model,
-            instructions=system_prompt,
-            input=input_messages,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-            text={"format": {"type": "json_object"}},
-        )
+        try:
+            response = client.responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=input_messages,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                text={"format": {"type": "json_object"}},
+            )
+        except BadRequestError as exc:
+            if not _temperature_unsupported_error(str(exc)):
+                raise
+            response = client.responses.create(
+                model=model,
+                instructions=system_prompt,
+                input=input_messages,
+                max_output_tokens=max_tokens,
+                text={"format": {"type": "json_object"}},
+            )
         content = (response.output_text or "").strip()
         extracted = _extract_json(content)
         try:

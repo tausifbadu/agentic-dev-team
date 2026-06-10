@@ -1,5 +1,6 @@
 """Dashboard API. FastAPI server that orchestrates the agentic dev team."""
 
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -26,6 +27,9 @@ from dashboard.backend.routes.comms import router as comms_router
 from dashboard.backend.routes.enhancements import router as enhancements_router
 from dashboard.backend.routes.events import router as events_router
 from dashboard.backend.routes.projects import router as projects_router
+workspace_chat_router = None
+if os.getenv("WORKSPACE_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"):
+    from dashboard.backend.routes.workspace_chat import router as workspace_chat_router
 import state_store
 
 
@@ -59,6 +63,8 @@ app.include_router(comms_router, prefix="/api")
 app.include_router(enhancements_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
+if workspace_chat_router is not None:
+    app.include_router(workspace_chat_router, prefix="/api")
 
 
 @app.get("/api/health")
