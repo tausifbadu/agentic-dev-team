@@ -21,6 +21,7 @@ finished, and the structured `finish_story` payload it produced.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -39,6 +40,24 @@ class ReactLoopOutcome:
     final_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+
+
+def _compaction_config() -> tuple[Optional[int], int]:
+    """Read working-memory compaction settings from the environment.
+
+    AGENTIC_COMPACT_AT_CHARS — transcript size (chars) that triggers compaction.
+        Default 48000 (~12K tokens). Set to 0 to disable compaction entirely.
+    AGENTIC_KEEP_LAST_ROUNDS — most-recent rounds kept verbatim. Default 6.
+    """
+    try:
+        threshold = int(os.getenv("AGENTIC_COMPACT_AT_CHARS", "48000"))
+    except ValueError:
+        threshold = 48000
+    try:
+        keep = int(os.getenv("AGENTIC_KEEP_LAST_ROUNDS", "6"))
+    except ValueError:
+        keep = 6
+    return (threshold if threshold > 0 else None), max(2, keep)
 
 
 def run_react_loop(
@@ -85,6 +104,7 @@ def run_react_loop(
     # defeating the gate. Letting `terminate` drive things means a rejected
     # finish_story does not end the loop, so the agent gets the rejection message
     # and must re-validate.
+    compact_at_chars, keep_last_rounds = _compaction_config()
     started = time.monotonic()
     loop_result: ToolLoopResult = call_llm_with_tools(
         client=client,
@@ -97,6 +117,8 @@ def run_react_loop(
         temperature=temperature,
         max_tokens=max_tokens,
         on_step=on_step,
+        compact_at_chars=compact_at_chars,
+        keep_last_rounds=keep_last_rounds,
     )
     elapsed = time.monotonic() - started
 
@@ -117,7 +139,11 @@ def run_react_loop(
             summary=finish.get("summary", "") or loop_result.final_text,
             iterations=loop_result.iterations,
             final_text=loop_result.final_text,
-            metadata={"elapsed_s": elapsed, **(finish.get("metadata") or {})},
+            metadata={
+                "elapsed_s": elapsed,
+                "compactions": loop_result.compactions,
+                **(finish.get("metadata") or {}),
+            },
         )
 
     # No finish_story with an accepted Definition-of-Done gate was recorded.
@@ -146,5 +172,9 @@ def run_react_loop(
         summary=summary,
         iterations=loop_result.iterations,
         final_text=loop_result.final_text,
-        metadata={"elapsed_s": elapsed, "implicit_finish_blocked": True},
+        metadata={
+            "elapsed_s": elapsed,
+            "compactions": loop_result.compactions,
+            "implicit_finish_blocked": True,
+        },
     )

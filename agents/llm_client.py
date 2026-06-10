@@ -305,6 +305,120 @@ def _call_responses_json(
 # Tool-calling ReAct loop
 # ---------------------------------------------------------------------------
 
+# Working-memory compaction.
+#
+# The ReAct loop accumulates every assistant turn + every tool result and resends
+# the whole transcript on each iteration, so token cost (and per-call latency)
+# grows ~quadratically over a long story. On a wall-clock-bounded run this is what
+# starves later stories of time. Compaction folds the OLDEST rounds into a single
+# rolling-summary system message, keeping the head (system + task), that summary,
+# and the most recent rounds verbatim.
+#
+# Hard constraint honored below: the chat API requires every assistant message
+# that carries `tool_calls` to be immediately followed by a `tool` message for
+# each call id. We therefore compact whole *rounds* (an assistant turn plus its
+# tool replies), never individual messages, so pairing is never broken.
+
+_COMPACT_MARKER = "[COMPACTED PROGRESS — earlier steps summarized below]"
+_COMPACT_SUMMARY_MAX = 12000  # cap the rolling summary so it can't itself bloat
+
+
+def _estimate_chars(messages: list[dict[str, Any]]) -> int:
+    """Coarse size estimate of the running transcript (chars ≈ 4× tokens)."""
+    total = 0
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        for tc in (m.get("tool_calls") or []):
+            total += len((tc.get("function") or {}).get("arguments") or "")
+    return total
+
+
+def _group_rounds(body: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group body messages into rounds. A round begins at each assistant message;
+    non-assistant messages (tool replies, injected system nudges) attach to the
+    current round. This keeps every assistant `tool_calls` turn together with its
+    matching `tool` replies so compaction can drop whole rounds safely.
+    """
+    rounds: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for m in body:
+        if m.get("role") == "assistant" and cur:
+            rounds.append(cur)
+            cur = [m]
+        else:
+            cur.append(m)
+    if cur:
+        rounds.append(cur)
+    return rounds
+
+
+def _summarize_round(round_msgs: list[dict[str, Any]]) -> str:
+    """Render one dropped round as a few compact lines: what the agent did and
+    whether each tool succeeded. Purely mechanical — no extra LLM call."""
+    lines: list[str] = []
+    for m in round_msgs:
+        role = m.get("role")
+        if role == "assistant":
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                names = ", ".join((tc.get("function") or {}).get("name", "?") for tc in tcs)
+                lines.append(f"- called: {names}")
+            txt = (m.get("content") or "").strip()
+            if txt:
+                lines.append(f"  thought: {txt[:140]}")
+        elif role == "tool":
+            name = m.get("name", "tool")
+            content = (m.get("content") or "").strip().replace("\n", " ")
+            status = "ERROR" if content.startswith("ERROR") else "ok"
+            lines.append(f"    {name} -> {status}: {content[:160]}")
+        # injected system pacing nudges are transient — omit from the summary.
+    return "\n".join(lines)
+
+
+def _compact_messages(
+    messages: list[dict[str, Any]], keep_last_rounds: int
+) -> list[dict[str, Any]]:
+    """Fold all but the last `keep_last_rounds` rounds into one rolling-summary
+    system message. Returns the original list unchanged if there is nothing
+    meaningful to compact.
+    """
+    if len(messages) < 3:
+        return messages
+    head = messages[:2]  # system prompt + user task — always verbatim
+
+    prior_summary = ""
+    body: list[dict[str, Any]] = []
+    for m in messages[2:]:
+        if (
+            m.get("role") == "system"
+            and isinstance(m.get("content"), str)
+            and m["content"].startswith(_COMPACT_MARKER)
+        ):
+            prior_summary = m["content"]
+            continue
+        body.append(m)
+
+    rounds = _group_rounds(body)
+    if len(rounds) <= keep_last_rounds:
+        return messages
+
+    drop = rounds[: -keep_last_rounds]
+    keep = rounds[-keep_last_rounds:]
+
+    new_chunk = "\n".join(s for s in (_summarize_round(r) for r in drop) if s.strip())
+    summary_body = (prior_summary or _COMPACT_MARKER) + "\n" + new_chunk
+    if len(summary_body) > _COMPACT_SUMMARY_MAX:
+        # Keep the marker + the most recent tail of the summary.
+        tail = summary_body[-_COMPACT_SUMMARY_MAX:]
+        summary_body = f"{_COMPACT_MARKER}\n... (older steps elided) ...\n{tail}"
+
+    summary_msg = {"role": "system", "content": summary_body}
+    flat_keep = [m for r in keep for m in r]
+    return head + [summary_msg] + flat_keep
+
+
 def call_llm_with_tools(
     client: OpenAI,
     model: str,
@@ -318,6 +432,8 @@ def call_llm_with_tools(
     max_tokens: int = 8192,
     on_step: Optional[Callable[[dict[str, Any]], None]] = None,
     is_finished: Optional[Callable[[str, dict[str, Any]], bool]] = None,
+    compact_at_chars: Optional[int] = None,
+    keep_last_rounds: int = 6,
 ) -> "ToolLoopResult":
     """Run a ReAct-style tool-use loop.
 
@@ -337,6 +453,12 @@ def call_llm_with_tools(
     is_finished
         Optional predicate `(name, parsed_args) -> bool` that short-circuits the
         loop when a particular tool is called (e.g. `finish_story`).
+    compact_at_chars
+        When set and the running transcript exceeds this many characters, the
+        oldest rounds are folded into a rolling summary so context stays bounded
+        (see `_compact_messages`). `None` disables compaction.
+    keep_last_rounds
+        How many of the most recent rounds to keep verbatim during compaction.
 
     Notes
     -----
@@ -354,6 +476,7 @@ def call_llm_with_tools(
     final_text = ""
     finished = False
     iterations = 0
+    compactions = 0
 
     # Inject pacing nudges so the agent self-regulates as it nears the cap.
     # Iter > 70% of cap → "wrap up" reminder; final 3 iters → "finish_story now".
@@ -364,6 +487,14 @@ def call_llm_with_tools(
 
     while iterations < max_iterations and not finished:
         iterations += 1
+
+        # Compact the transcript at a safe point (between fully-completed rounds)
+        # before building the next request, so context stays bounded.
+        if compact_at_chars and _estimate_chars(messages) > compact_at_chars:
+            compacted = _compact_messages(messages, keep_last_rounds)
+            if len(compacted) < len(messages):
+                messages = compacted
+                compactions += 1
 
         # Pacing nudges as system-role reminders. The model sees them inline.
         if iterations == nudge_70 and not nudge_70_emitted:
@@ -477,6 +608,7 @@ def call_llm_with_tools(
         finished=finished,
         iterations=iterations,
         messages=messages,
+        compactions=compactions,
     )
 
 
@@ -505,7 +637,7 @@ class ToolInvocation:
 class ToolLoopResult:
     """Outcome of a tool-using loop."""
 
-    __slots__ = ("final_text", "finished", "iterations", "messages", "error")
+    __slots__ = ("final_text", "finished", "iterations", "messages", "error", "compactions")
 
     def __init__(
         self,
@@ -514,9 +646,11 @@ class ToolLoopResult:
         iterations: int,
         messages: Optional[list[dict[str, Any]]] = None,
         error: Optional[str] = None,
+        compactions: int = 0,
     ):
         self.final_text = final_text
         self.finished = finished
         self.iterations = iterations
         self.messages = messages or []
         self.error = error
+        self.compactions = compactions
