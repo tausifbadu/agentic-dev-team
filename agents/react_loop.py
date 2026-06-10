@@ -8,13 +8,19 @@ then calls `run_react_loop()` which:
   3. Persists every assistant turn and tool result via the message bus + log.
   4. Stops when the agent calls `finish_story` (or hits a budget cap).
 
+Success semantics: the loop reports success ONLY when the agent explicitly called
+`finish_story` and its Definition-of-Done gate accepted the call. Abandoning the
+loop — running out of iterations, or returning a plain assistant message with no
+tool call — is reported as a FAILURE, never an implicit success. This prevents
+"false-green" stories that wrote no code and ran no validator from being recorded
+as complete.
+
 The result is a `ReactLoopOutcome` capturing whether the agent finished, how it
 finished, and the structured `finish_story` payload it produced.
 """
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -70,9 +76,15 @@ def run_react_loop(
             terminate=terminate,
         )
 
-    def _is_finished(name: str, parsed: dict[str, Any]) -> bool:
-        return name == "finish_story"
-
+    # NOTE: we deliberately do NOT pass an `is_finished` name predicate. Loop
+    # termination is governed solely by `invocation.terminate`, which `_invoke`
+    # derives from the tool result's `final` flag. The `finish_story` handler sets
+    # `final` ONLY when its Definition-of-Done gate accepts the call (or on an
+    # explicit success=false). A name-based predicate would short-circuit the loop
+    # on *any* finish_story call — including one the gate rejected — silently
+    # defeating the gate. Letting `terminate` drive things means a rejected
+    # finish_story does not end the loop, so the agent gets the rejection message
+    # and must re-validate.
     started = time.monotonic()
     loop_result: ToolLoopResult = call_llm_with_tools(
         client=client,
@@ -85,7 +97,6 @@ def run_react_loop(
         temperature=temperature,
         max_tokens=max_tokens,
         on_step=on_step,
-        is_finished=_is_finished,
     )
     elapsed = time.monotonic() - started
 
@@ -109,21 +120,31 @@ def run_react_loop(
             metadata={"elapsed_s": elapsed, **(finish.get("metadata") or {})},
         )
 
-    # Agent stopped without explicit finish — treat as success if it returned text,
-    # failure if it ran out of iterations.
-    if loop_result.iterations >= max_iterations and not loop_result.finished:
-        return ReactLoopOutcome(
-            success=False,
-            summary=f"Agent exceeded {max_iterations} iterations without calling finish_story",
-            iterations=loop_result.iterations,
-            final_text=loop_result.final_text,
-            metadata={"elapsed_s": elapsed},
+    # No finish_story with an accepted Definition-of-Done gate was recorded.
+    #
+    # Success-semantics policy: a story is complete ONLY when the agent explicitly
+    # calls finish_story AND the runtime DoD gate accepts it (which populates the
+    # `finish` payload consumed above). Reaching this point means the agent
+    # abandoned the loop — it ran out of iterations, or returned a plain assistant
+    # message with no tool call. The previous implementation returned success=True
+    # here ("implicit finish"), which silently passed stories that wrote no code and
+    # ran no validator (the root cause of false-green stories). It is now a FAILURE,
+    # surfaced to the supervisor (which publishes story.failed, records a failure
+    # pattern, and asks PM to skip/simplify/halt).
+    if loop_result.iterations >= max_iterations:
+        summary = (
+            f"Agent exhausted its {max_iterations}-iteration budget without a "
+            "validated finish_story call. Marking the story failed for review."
         )
-
+    else:
+        summary = (
+            "Agent ended its turn without calling finish_story (no validated "
+            "Definition of Done). Marking the story failed for review."
+        )
     return ReactLoopOutcome(
-        success=True,
-        summary=loop_result.final_text or "Loop completed without explicit finish",
+        success=False,
+        summary=summary,
         iterations=loop_result.iterations,
         final_text=loop_result.final_text,
-        metadata={"elapsed_s": elapsed, "implicit_finish": True},
+        metadata={"elapsed_s": elapsed, "implicit_finish_blocked": True},
     )
