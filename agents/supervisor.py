@@ -74,6 +74,10 @@ class SupervisorResult:
     outcomes: list[StoryOutcome] = field(default_factory=list)
     total_tool_calls: int = 0
     elapsed_s: float = 0.0
+    # "completed" (all passed) | "completed_with_failures" (some passed, some not)
+    # | "failed" (nothing passed). Distinguishes a clean run from a partial one so
+    # callers never read a budget-starved run as a success.
+    conclusion: str = ""
 
 
 ProgressCallback = Optional[Callable[[str, str, str, Optional[str]], None]]
@@ -154,8 +158,9 @@ class Supervisor:
             # Phase 1: Backend stories.
             self._log("supervisor", "info",
                       f"Phase: backend ({len(backend_stories)} stories)")
-            for story in backend_stories:
+            for idx, story in enumerate(backend_stories):
                 if self._budget_exceeded():
+                    self._abort_remaining(backend_stories[idx:], "run budget exceeded")
                     break
                 self._run_story(self.backend, story)
 
@@ -167,8 +172,9 @@ class Supervisor:
             # Phase 2: Frontend stories.
             self._log("supervisor", "info",
                       f"Phase: frontend ({len(frontend_stories)} stories)")
-            for story in frontend_stories:
+            for idx, story in enumerate(frontend_stories):
                 if self._budget_exceeded():
+                    self._abort_remaining(frontend_stories[idx:], "run budget exceeded")
                     break
                 # Frontend story is skipped if its declared backend dependency failed.
                 if not self._dependencies_satisfied(story):
@@ -176,25 +182,43 @@ class Supervisor:
                     continue
                 self._run_story(self.frontend, story)
 
-            # Phase 3: Test suite (run once for the whole pack).
+            # Phase 3: Test suite (one run validates the whole pack).
+            test_outcome: Optional[StoryOutcome] = None
             if self.config.run_tests and (test_stories or self._has_passed("backend") or self._has_passed("frontend")):
-                test_story = test_stories[0] if test_stories else None
                 self._log("supervisor", "info", "Phase: testing")
-                if not self._budget_exceeded():
-                    self._run_story(self.test, test_story or _make_synthetic_test_story())
+                if self._budget_exceeded():
+                    self._abort_remaining(test_stories, "run budget exceeded")
+                else:
+                    test_story = test_stories[0] if test_stories else _make_synthetic_test_story()
+                    test_outcome = self._run_story(self.test, test_story)
+                    # Mirror the single test-suite outcome onto every testing story
+                    # so they are all accounted for instead of silently missing.
+                    self._propagate_test_outcome(test_story, test_stories)
 
             # Phase 4: Smoke (optional).
             if self.config.run_smoke and not self._budget_exceeded():
                 self._log("supervisor", "info", "Phase: smoke")
                 self._run_smoke_phase()
 
-            success = all(o.status == "passed" for o in self.outcomes.values())
+            # Reconcile: every story must have an outcome. Anything still missing
+            # means the run ended (budget/halt) before reaching it — record it as a
+            # failure rather than letting it vanish from the tally and inflate the
+            # apparent success rate.
+            self._finalize_outcomes()
+
+            success = self._compute_success(test_outcome)
+            conclusion = (
+                "completed" if success
+                else "completed_with_failures"
+                if any(o.status == "passed" for o in self.outcomes.values())
+                else "failed"
+            )
             summary_msg = self._final_summary(success)
             self._log("supervisor", "info" if success else "error", summary_msg)
             self.bus.publish(
                 topic="run.completed" if success else "run.failed",
                 from_agent="supervisor",
-                payload={"summary": summary_msg},
+                payload={"summary": summary_msg, "conclusion": conclusion},
                 summary=summary_msg[:200],
             )
 
@@ -204,6 +228,7 @@ class Supervisor:
                 outcomes=list(self.outcomes.values()),
                 total_tool_calls=self.budget.tool_calls_used,
                 elapsed_s=time.monotonic() - started,
+                conclusion=conclusion,
             )
         finally:
             for agent in (self.pm, self.backend, self.frontend, self.test):
@@ -424,6 +449,66 @@ class Supervisor:
         )
         self.outcomes[story.id] = outcome
         self._log("supervisor", "info", f"Skipped {story.title}: {reason}")
+
+    def _abort_remaining(self, stories: list[Story], reason: str) -> None:
+        """Record stories that never ran (budget/halt) as failures, so they are
+        counted instead of silently dropped from the tally."""
+        for s in stories:
+            if s.id in self.outcomes:
+                continue
+            self.outcomes[s.id] = StoryOutcome(
+                story_id=s.id, title=s.title, ownership=s.ownership,
+                status="failed", iterations=0, tool_calls=0,
+                summary=f"Aborted: {reason}",
+            )
+            self._log("supervisor", "error", f"Aborted {s.title}: {reason}")
+
+    def _propagate_test_outcome(self, ran_story: Story, test_stories: list[Story]) -> None:
+        """The test agent runs once for the whole pack. Mirror that single outcome
+        onto every testing story so each is accounted for in the final tally."""
+        src = self.outcomes.get(ran_story.id)
+        if not src:
+            return
+        for s in test_stories:
+            if s.id == ran_story.id or s.id in self.outcomes:
+                continue
+            self.outcomes[s.id] = StoryOutcome(
+                story_id=s.id, title=s.title, ownership=s.ownership,
+                status=src.status, iterations=0, tool_calls=0,
+                summary=f"Covered by the test-suite run ({ran_story.id}): {src.status}",
+            )
+
+    def _finalize_outcomes(self) -> None:
+        """Guarantee every story has an outcome before the tally is computed."""
+        for s in self.stories:
+            if s.id in self.outcomes:
+                continue
+            if s.ownership == "testing" and not self.config.run_tests:
+                self.outcomes[s.id] = StoryOutcome(
+                    story_id=s.id, title=s.title, ownership=s.ownership,
+                    status="skipped", iterations=0, tool_calls=0,
+                    summary="Testing phase disabled for this run (fast track).",
+                )
+            else:
+                self.outcomes[s.id] = StoryOutcome(
+                    story_id=s.id, title=s.title, ownership=s.ownership,
+                    status="failed", iterations=0, tool_calls=0,
+                    summary="Not executed: run ended before this story (budget/halt).",
+                )
+
+    def _compute_success(self, test_outcome: Optional[StoryOutcome]) -> bool:
+        """A run succeeds only when every backend & frontend story passed and —
+        when testing is enabled — the test suite passed too. Aborted, skipped, or
+        failed stories all count against it."""
+        for s in self.stories:
+            if s.ownership in ("backend", "frontend"):
+                o = self.outcomes.get(s.id)
+                if not o or o.status != "passed":
+                    return False
+        if self.config.run_tests:
+            if test_outcome is None or test_outcome.status != "passed":
+                return False
+        return True
 
     def _budget_exceeded(self) -> bool:
         if self.budget.wall_exceeded():
