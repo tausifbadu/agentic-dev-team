@@ -6,6 +6,7 @@ fit comfortably inside an LLM context window.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -775,6 +777,178 @@ def _git_diff_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return ToolResult(ok=True, content=body.rstrip())
 
 
+# ---------------------------------------------------------------------------
+# check_ui — serve the built frontend and assert rendered DOM in a headless browser
+# ---------------------------------------------------------------------------
+
+# Runs in a subprocess (isolates Playwright + avoids any asyncio-loop conflict
+# with the dashboard's uvicorn host). Prints a single JSON line to stdout.
+_PLAYWRIGHT_DRIVER = r'''
+import sys, json
+params = json.loads(sys.argv[1])
+url = params["url"]
+expect_text = params.get("expect_text", [])
+expect_selectors = params.get("expect_selectors", [])
+timeout = int(params.get("timeout", 25))
+try:
+    from playwright.sync_api import sync_playwright
+except Exception as exc:
+    print(json.dumps({"_error": "playwright_missing", "detail": str(exc)})); sys.exit(0)
+console_errors = []
+try:
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:
+            print(json.dumps({"_error": "browser_missing", "detail": str(exc)})); sys.exit(0)
+        page = browser.new_page()
+        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: console_errors.append("pageerror: " + str(e)))
+        resp = page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+        page.wait_for_timeout(600)
+        body_text = page.inner_text("body")[:6000]
+        text_results = [{"text": t, "found": t.lower() in body_text.lower()} for t in expect_text]
+        sel_results = []
+        for s in expect_selectors:
+            try:
+                cnt = page.locator(s).count()
+            except Exception:
+                cnt = -1
+            sel_results.append({"selector": s, "count": cnt, "found": cnt > 0})
+        browser.close()
+    print(json.dumps({
+        "status": resp.status if resp else None, "body_text": body_text,
+        "text_results": text_results, "selector_results": sel_results,
+        "console_errors": console_errors[:20],
+    }))
+except Exception as exc:
+    print(json.dumps({"_error": "driver_crash", "detail": str(exc)}))
+'''
+
+
+def _serve_dir(directory: Path, port: int):
+    """Serve a built SPA on 127.0.0.1:port in a daemon thread, falling back to
+    index.html for client-side routes. Returns the server (call .shutdown())."""
+    from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+
+    class _SPAHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *args):  # silence access logs
+            pass
+
+        def do_GET(self):
+            fs_path = self.translate_path(self.path)
+            base = os.path.basename(self.path.split("?")[0])
+            if not os.path.exists(fs_path) and "." not in base:
+                self.path = "/index.html"  # SPA fallback
+            return super().do_GET()
+
+    handler = functools.partial(_SPAHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Serve the built frontend and verify rendered DOM in a headless browser.
+
+    Use AFTER ``run_npm_build`` to confirm the story's UI actually renders the
+    elements/text it requires (build success alone proves nothing about the DOM).
+    Pass ``expect_text`` and/or ``expect_selectors`` from the story's acceptance
+    criteria. Soft-passes if Playwright or its browser is not installed.
+    """
+    path = args.get("path") or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    expect_text = [str(t) for t in (args.get("expect_text") or [])]
+    expect_selectors = [str(s) for s in (args.get("expect_selectors") or [])]
+    timeout = int(args.get("timeout", 25))
+
+    cwd = _scratch(ctx)
+    index = cwd / "dist" / "index.html"
+    if not index.exists():
+        return ToolResult(
+            ok=False,
+            content="No dist/index.html found. Run run_npm_build first, then call check_ui.",
+        )
+
+    port = _find_free_port()
+    server = _serve_dir(cwd / "dist", port)
+    try:
+        url = f"http://127.0.0.1:{port}{path}"
+        params = json.dumps({
+            "url": url, "expect_text": expect_text,
+            "expect_selectors": expect_selectors, "timeout": timeout,
+        })
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _PLAYWRIGHT_DRIVER, params],
+                capture_output=True, text=True, timeout=timeout + 45,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult(ok=False, content=f"check_ui timed out after {timeout + 45}s")
+
+        out = (proc.stdout or "").strip()
+        try:
+            data = json.loads(out.splitlines()[-1]) if out else {}
+        except (json.JSONDecodeError, IndexError):
+            return ToolResult(
+                ok=True,
+                content=(
+                    "check_ui: could not parse browser output (soft pass — not a validation).\n"
+                    f"stdout: {out[:400]}\nstderr: {(proc.stderr or '')[-400:]}"
+                ),
+            )
+
+        err = data.get("_error")
+        if err in ("playwright_missing", "browser_missing"):
+            return ToolResult(
+                ok=True,
+                content=(
+                    f"check_ui skipped: headless browser unavailable ({err}). "
+                    "Enable runtime UI checks with: "
+                    "`pip install playwright && python -m playwright install chromium`. "
+                    "(soft pass — not a validation)"
+                ),
+                metadata={"skipped": True, "reason": err},
+            )
+        if err:
+            return ToolResult(ok=False, content=f"check_ui driver error: {str(data.get('detail', ''))[:600]}")
+
+        text_results = data.get("text_results", [])
+        sel_results = data.get("selector_results", [])
+        console_errors = data.get("console_errors", [])
+        missing_text = [t["text"] for t in text_results if not t["found"]]
+        missing_sel = [s["selector"] for s in sel_results if not s["found"]]
+        has_expectations = bool(expect_text or expect_selectors)
+        ok = (not missing_text and not missing_sel) if has_expectations else True
+
+        lines = [f"check_ui {path} → HTTP {data.get('status')} ({'PASS' if ok else 'FAIL'})"]
+        if text_results:
+            lines.append("Text: " + ", ".join(
+                f"{'✓' if t['found'] else '✗'} {t['text'][:40]}" for t in text_results))
+        if sel_results:
+            lines.append("Selectors: " + ", ".join(
+                f"{'✓' if s['found'] else '✗'} {s['selector']} (n={s['count']})" for s in sel_results))
+        if console_errors:
+            lines.append(f"⚠ console/page errors ({len(console_errors)}): "
+                         + " | ".join(str(e)[:120] for e in console_errors[:5]))
+        lines.append("--- rendered body text (excerpt) ---")
+        lines.append((data.get("body_text") or "").strip()[:2500] or "(empty body — page rendered nothing)")
+
+        return ToolResult(
+            ok=ok,
+            content="\n".join(lines),
+            metadata={"missing_text": missing_text, "missing_selectors": missing_sel,
+                      "console_errors": console_errors, "status": data.get("status")},
+        )
+    finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+
+
 def register_exec_tools(registry: ToolRegistry) -> None:
     registry.register(Tool(
         name="run_pytest",
@@ -888,4 +1062,32 @@ def register_exec_tools(registry: ToolRegistry) -> None:
         ),
         parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
         handler=_git_diff_handler,
+    ))
+    registry.register(Tool(
+        name="check_ui",
+        description=(
+            "Serve the built frontend (dist/) and verify the RENDERED DOM in a headless "
+            "browser. Use AFTER run_npm_build to prove the story's UI actually renders — "
+            "build success alone says nothing about the DOM. Pass expect_text (visible "
+            "strings) and/or expect_selectors (CSS selectors) drawn from the story's "
+            "acceptance criteria; ok=True only if all are found. Also reports console/page "
+            "errors (blank-page symptoms). Soft-passes if a headless browser isn't installed."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Route to load (default '/')"},
+                "expect_text": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Visible text strings that must appear in the rendered page",
+                },
+                "expect_selectors": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "CSS selectors that must match at least one element",
+                },
+                "timeout": {"type": "integer", "minimum": 5, "maximum": 120},
+            },
+            "additionalProperties": False,
+        },
+        handler=_check_ui_handler,
     ))

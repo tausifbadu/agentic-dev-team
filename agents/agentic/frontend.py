@@ -42,7 +42,20 @@ Workflow you choose:
   3. Edit files via `write_file` or `apply_patch`.
   4. Validate with `run_npm_build` (auto-runs npm install + vite build).
      Use `run_lint` for fast feedback before the heavier build.
-  5. When the build is green, call `finish_story(success=true)`.
+  5. After a green build, call `check_ui` to confirm the UI ACTUALLY RENDERS.
+     A green build does NOT prove your UI works — only that it compiled. Pass
+     `expect_text` and `expect_selectors` drawn straight from THIS story's
+     acceptance criteria (e.g. expect_text=["Detect My Location"],
+     expect_selectors=[".glass-card", "button"]). check_ui also reports console/
+     page errors — a blank page with errors means your UI is broken even though
+     the build passed. Fix and re-run until check_ui passes.
+  6. Only when build is green AND check_ui confirms the required elements render,
+     call `finish_story(success=true)`.
+
+Your definition of done is the story's acceptance criteria — NOT a green build.
+Before finishing, make sure every UI element/state the criteria name (buttons,
+inputs, icons, loading/empty/error states, specific classes) is actually present
+in the rendered DOM, verified via check_ui.
 
 Self-healing loop (this is your job, not PM's):
   • Build error or lint error → read the error carefully.
@@ -85,7 +98,7 @@ class FrontendAgent(AgentBase):
     default_model = "gpt-4o-mini"
     allowed_tools = [
         "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
-        "run_npm_install", "run_npm_build",
+        "run_npm_install", "run_npm_build", "check_ui",
         "run_lint", "git_diff",
         "ask_pm", "query_agent", "request_review", "send_message",
         "read_storypack", "read_past_patterns", "read_logs", "read_api_contract",
