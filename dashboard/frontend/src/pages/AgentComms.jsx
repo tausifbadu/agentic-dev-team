@@ -640,7 +640,7 @@ export default function AgentComms() {
     total: timeline.length,
     heals: timeline.filter((e) => e.event_type === "heal_request").length,
     dialogs: dialogCount,
-    contracts: timeline.filter((e) => e.event_type === "contract_publish").length,
+    contracts: timeline.filter((e) => e.event_type === "contract.published").length,
   };
 
   const tabs = [

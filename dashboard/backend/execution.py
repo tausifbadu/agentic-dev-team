@@ -77,6 +77,126 @@ def get_active_budget_snapshot() -> dict:
         return {}
 
 
+def derive_status_from_db() -> dict:
+    """Reconstruct run status from the durable DB (the single source of truth).
+
+    `execution_state` is an in-memory cache local to *this* process, so it is wrong
+    whenever the run executes elsewhere (CLI) or the server was reloaded mid-run.
+    This rebuilds status from agent_comms/storypacks so the dashboard is correct
+    regardless of how/where the run was triggered, and after a reload.
+    """
+    status = {
+        "running": False, "current_agent": None, "current_story_id": None,
+        "storypack_id": None, "run_id": None, "completed_stories": [],
+        "failed_stories": [], "skipped_stories": [], "phase": "idle",
+        "conclusion": None, "runtime": "agentic", "source": "db",
+    }
+    try:
+        packs = state_store.list_storypacks()
+    except Exception:
+        return status
+    if not packs:
+        return status
+
+    pack = packs[0]  # list_storypacks() is newest-first
+    pack_id = pack.get("id")
+    pstatus = pack.get("status")
+    status["storypack_id"] = pack_id
+
+    try:
+        comms = state_store.get_agent_comms(storypack_id=pack_id, limit=2000)
+    except Exception:
+        comms = []
+    comms = sorted(comms, key=lambda c: c.get("id", 0))
+
+    final_story: dict[str, str] = {}
+    last_assigned = None
+    end_event = None
+    run_id = None
+    for c in comms:
+        et = c.get("event_type")
+        if c.get("run_id"):
+            run_id = c["run_id"]
+        if et == "story.assigned":
+            last_assigned = c
+        elif et in ("story.completed", "story.failed"):
+            sid = c.get("story_id")
+            if sid:
+                final_story[sid] = et
+        elif et in ("run.completed", "run.failed"):
+            end_event = c
+    status["run_id"] = run_id
+    status["completed_stories"] = [s for s, e in final_story.items() if e == "story.completed"]
+    status["failed_stories"] = [s for s, e in final_story.items() if e == "story.failed"]
+
+    if end_event is not None:
+        status["phase"] = "done"
+        status["running"] = False
+        try:
+            payload = json.loads(end_event.get("payload_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        status["conclusion"] = payload.get("conclusion") or (
+            "completed" if end_event.get("event_type") == "run.completed" else "failed"
+        )
+    elif pstatus == "in_progress":
+        status["running"] = True
+        if last_assigned is not None:
+            status["current_story_id"] = last_assigned.get("story_id")
+            try:
+                p = json.loads(last_assigned.get("payload_json") or "{}")
+                status["current_agent"] = p.get("agent")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            status["phase"] = status["current_agent"] or "running"
+    return status
+
+
+def derive_budget_from_db(pack_id: str, run_id: str | None, tool_calls_used: int) -> dict:
+    """Reconstruct a budget snapshot from the DB for runs not live in this process
+    (so the Live console shows real tool-call/wall-clock usage, not 0/0)."""
+    import datetime
+    budget = {
+        "max_tool_calls": int(os.getenv("AGENTIC_MAX_TOOL_CALLS", "600")),
+        "max_wall_seconds": float(os.getenv("AGENTIC_MAX_WALL_SECONDS", "1800")),
+        "tool_calls_used": int(tool_calls_used),
+        "elapsed_seconds": 0.0,
+        "remaining_seconds": 0.0,
+    }
+    try:
+        comms = state_store.get_agent_comms(storypack_id=pack_id, run_id=run_id, limit=2000)
+        ts = sorted(c["created_at"] for c in comms if c.get("created_at"))
+        if len(ts) >= 2:
+            a = datetime.datetime.fromisoformat(ts[0])
+            z = datetime.datetime.fromisoformat(ts[-1])
+            elapsed = (z - a).total_seconds()
+            budget["elapsed_seconds"] = round(elapsed, 1)
+            budget["remaining_seconds"] = round(max(0.0, budget["max_wall_seconds"] - elapsed), 1)
+    except Exception:
+        pass
+    return budget
+
+
+def current_run_status() -> dict:
+    """Authoritative run status for the API.
+
+    Prefer the in-memory `execution_state` only while a run is genuinely live in
+    THIS process (most granular), or when it holds the finished result of the same
+    latest run. Otherwise reconstruct from the DB.
+    """
+    es = execution_state
+    if es.get("running"):
+        return {**es, "source": "memory"}
+    db = derive_status_from_db()
+    if (
+        es.get("storypack_id")
+        and es.get("storypack_id") == db.get("storypack_id")
+        and es.get("conclusion")
+    ):
+        return {**es, "source": "memory"}
+    return db
+
+
 def get_active_bus():
     """Return the bus of the in-flight Supervisor (if any), else None.
 

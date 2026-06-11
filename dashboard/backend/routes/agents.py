@@ -9,7 +9,12 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import state_store
-from dashboard.backend.execution import execution_state, get_active_budget_snapshot
+from dashboard.backend.execution import (
+    execution_state,
+    get_active_budget_snapshot,
+    current_run_status,
+    derive_budget_from_db,
+)
 
 router = APIRouter(tags=["agents"])
 
@@ -25,8 +30,9 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
     the SSE Live Console stream. Combines tool calls + bus message counts so
     every known agent appears even when it only communicates via messages.
     """
-    pack_id = execution_state.get("storypack_id") or ""
-    run_id = execution_state.get("run_id") or ""
+    status = current_run_status()
+    pack_id = status.get("storypack_id") or ""
+    run_id = status.get("run_id") or ""
 
     summary = state_store.get_tool_call_summary(
         storypack_id=pack_id or None, run_id=run_id or None,
@@ -84,7 +90,13 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
         })
 
     live_budget = get_active_budget_snapshot()
-    budget = live_budget or execution_state.get("budget") or {}
+    total_calls = sum(int(r.get("count", 0)) for r in summary)
+    budget = (
+        live_budget
+        or status.get("budget")
+        or execution_state.get("budget")
+        or (derive_budget_from_db(pack_id, run_id or None, total_calls) if pack_id else {})
+    )
 
     failures_by_tool: dict[tuple[str, str], int] = {}
     for row in recent_calls:
@@ -110,7 +122,7 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
     )
 
     return {
-        "execution_state": execution_state.copy(),
+        "execution_state": status,
         "by_agent": agents_sorted,
         "recent_calls": recent_calls,
         "total_tool_calls": sum(a["tool_calls"] for a in agents_sorted),
@@ -125,7 +137,7 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
 
 @router.get("/agents/status")
 def get_agent_status():
-    return execution_state.copy()
+    return current_run_status()
 
 
 @router.get("/agents/logs")
