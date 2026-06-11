@@ -7,12 +7,14 @@ fit comfortably inside an LLM context window.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -114,17 +116,39 @@ def _trim(text: str) -> str:
     return f"... (truncated, showing last {OUTPUT_TAIL_CHARS} chars)\n{text[-OUTPUT_TAIL_CHARS:]}"
 
 
+# Caching: pip installs into the shared interpreter env, and `requirements.txt` is
+# usually identical across stories/attempts — yet the old code reran `pip install`
+# on every http_check / pytest / smoke (the biggest avoidable wall-clock cost).
+# We now skip the install when this exact requirements set has already been
+# installed in this interpreter, keyed by content hash + interpreter prefix.
+_PIP_MARKER_DIR = Path(tempfile.gettempdir()) / "agentic_pip_markers"
+
+
 def _run_pip_install(cwd: Path) -> None:
     req = cwd / "requirements.txt"
     if not req.exists():
         return
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
+    try:
+        digest = hashlib.sha256(req.read_bytes() + sys.prefix.encode()).hexdigest()
+    except OSError:
+        digest = None
+    marker = (_PIP_MARKER_DIR / digest) if digest else None
+    if marker is not None and marker.exists():
+        return  # this exact requirements set is already installed in this env
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "--prefer-offline",
+         "-r", "requirements.txt"],
         cwd=cwd,
         capture_output=True,
         check=False,
-        timeout=180,
+        timeout=300,
     )
+    if marker is not None and result.returncode == 0:
+        try:
+            _PIP_MARKER_DIR.mkdir(parents=True, exist_ok=True)
+            marker.write_text("ok", encoding="utf-8")
+        except OSError:
+            pass
 
 
 def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -198,12 +222,63 @@ def _npm_command() -> list[str] | None:
     return [npm_exe]
 
 
+# Caching: each frontend story runs in a fresh scratch dir that excludes
+# node_modules, so the old code did a full `npm install` per story. We keep a
+# shared node_modules cache keyed by package.json (+ lockfile) hash: the first
+# story populates it, later stories symlink it in so `npm install` is a near-noop.
+_NPM_CACHE_DIR = Path(tempfile.gettempdir()) / "agentic_npm_cache"
+
+
+def _npm_cache_node_modules(cwd: Path) -> Path | None:
+    pkg = cwd / "package.json"
+    if not pkg.exists():
+        return None
+    try:
+        blob = pkg.read_bytes()
+        lock = cwd / "package-lock.json"
+        if lock.exists():
+            blob += lock.read_bytes()
+        digest = hashlib.sha256(blob).hexdigest()[:16]
+    except OSError:
+        return None
+    return _NPM_CACHE_DIR / digest / "node_modules"
+
+
+def _link_node_modules(cwd: Path) -> None:
+    """Symlink a cached node_modules into the scratch dir before `npm install`."""
+    scratch_nm = cwd / "node_modules"
+    if scratch_nm.exists() or scratch_nm.is_symlink():
+        return
+    cache_nm = _npm_cache_node_modules(cwd)
+    if cache_nm is not None and cache_nm.exists():
+        try:
+            scratch_nm.symlink_to(cache_nm, target_is_directory=True)
+        except OSError:
+            pass
+
+
+def _save_node_modules(cwd: Path) -> None:
+    """Populate the shared cache from a freshly installed (real) node_modules."""
+    cache_nm = _npm_cache_node_modules(cwd)
+    if cache_nm is None or cache_nm.exists():
+        return
+    scratch_nm = cwd / "node_modules"
+    if scratch_nm.is_symlink() or not scratch_nm.exists():
+        return  # nothing real to cache
+    try:
+        cache_nm.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(scratch_nm, cache_nm, symlinks=False)
+    except OSError:
+        pass
+
+
 def _run_npm_install_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     cwd = _scratch(ctx)
     cmd = _npm_command()
     if not cmd:
         return ToolResult(ok=False, content="npm not found on PATH")
 
+    _link_node_modules(cwd)
     try:
         result = subprocess.run(
             [*cmd, "install", "--prefer-offline", "--no-audit", "--no-fund"],
@@ -215,6 +290,8 @@ def _run_npm_install_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResu
         )
     except subprocess.TimeoutExpired as exc:
         return ToolResult(ok=False, content=f"npm install timed out\n{_trim((exc.stdout or '') + (exc.stderr or ''))}")
+    if result.returncode == 0:
+        _save_node_modules(cwd)
 
     output = _trim(f"{result.stdout}\n{result.stderr}")
     return ToolResult(
@@ -234,6 +311,7 @@ def _run_npm_build_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
     if not npx_exe:
         return ToolResult(ok=False, content="npx not found on PATH")
 
+    _link_node_modules(cwd)
     install = subprocess.run(
         [*cmd, "install", "--prefer-offline", "--no-audit", "--no-fund"],
         cwd=cwd,
@@ -247,6 +325,7 @@ def _run_npm_build_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
             ok=False,
             content=f"npm install failed (exit={install.returncode})\n{_trim(install.stdout + install.stderr)}",
         )
+    _save_node_modules(cwd)
 
     try:
         build = subprocess.run(
