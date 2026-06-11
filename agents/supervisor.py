@@ -50,8 +50,15 @@ class SupervisorConfig:
     # Dev agents now self-heal inside their own ReAct loop; the supervisor only
     # asks PM once per failure for a rescope decision (skip/simplify/halt).
     max_pm_heal_attempts: int = 0
-    max_wall_seconds: float = 1800.0   # 30 min default
-    max_total_tool_calls: int = 600
+    # Default budgets read from the environment so they can actually be raised for
+    # a run. (The Supervisor takes min(config, env_budget); if these defaults stayed
+    # hardcoded at 1800/600, the min() would clamp any larger env value back down.)
+    max_wall_seconds: float = field(
+        default_factory=lambda: float(os.getenv("AGENTIC_MAX_WALL_SECONDS", "1800"))
+    )
+    max_total_tool_calls: int = field(
+        default_factory=lambda: int(os.getenv("AGENTIC_MAX_TOOL_CALLS", "600"))
+    )
     run_tests: bool = True
     run_smoke: bool = True
     # Acceptance-criteria verification: after an agent passes its DoD gate, an
