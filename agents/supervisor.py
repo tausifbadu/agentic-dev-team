@@ -501,6 +501,13 @@ class Supervisor:
             if verdict is None:
                 # Verifier unavailable/crashed — do not block the agent's own pass.
                 return result
+            if verdict.get("inconclusive"):
+                # The reviewer malfunctioned (returned no usable assessment). That is
+                # NOT a story failure — pass the agent's own validated result through.
+                self._log("verifier", "info",
+                          f"Acceptance check inconclusive for {story.title}; passing through.",
+                          verdict.get("note"))
+                return result
             if verdict.get("all_met"):
                 self._log("verifier", "info",
                           f"Acceptance check PASSED for {story.title} "

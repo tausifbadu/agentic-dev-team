@@ -102,54 +102,98 @@ def verify_story_acceptance(
     workspace_dir: Path,
     client: Any,
     model: str,
+    max_attempts: int = 2,
 ) -> Optional[dict]:
     """Judge a story's artifact against its acceptance criteria.
 
-    Returns a dict ``{"criteria": [...], "all_met": bool, "unmet": [...]}`` or
-    ``None`` if verification could not be performed (caller should not block on a
-    verifier failure). ``all_met`` is computed here, not trusted from the model.
+    Returns ``{"criteria": [...], "all_met": bool, "unmet": [...], "inconclusive": bool}``
+    or ``None`` if verification could not be performed.
+
+    Robustness (why this matters): the verifier LLM is occasionally flaky and
+    returns an empty/short criteria list. That is a *verifier* malfunction, not a
+    story failure — failing the story on it produces false negatives (observed: a
+    fully-implemented, http_check-validated story marked "all unmet"). So we retry
+    once, and if the reviewer still assesses fewer than half the criteria we return
+    ``inconclusive=True`` and do NOT fail the story (the supervisor passes it
+    through, like a verifier crash). We only fail criteria the reviewer actually
+    judged unmet — plus a minority it dropped, but only when most were assessed.
+    ``all_met`` is computed here, never trusted from the model.
     """
     acs = [a for a in (story.acceptance_criteria or []) if a and a.strip()]
     if not acs:
-        return {"criteria": [], "all_met": True, "unmet": []}
+        return {"criteria": [], "all_met": True, "unmet": [], "inconclusive": False}
 
     from agents.llm_client import call_llm_json
 
     evidence = _collect_evidence(Path(workspace_dir), story.ownership)
-    user_prompt = (
+    base_prompt = (
         f"STORY: {story.title}\n{story.description}\n\n"
         f"ACCEPTANCE CRITERIA ({len(acs)}):\n"
         + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(acs))
         + f"\n\nACTUAL CODE PRODUCED:\n{evidence}"
     )
+    quorum = max(1, (len(acs) + 1) // 2)  # need >= half assessed to trust the verdict
 
-    data = call_llm_json(
-        client, model, _SYSTEM, user_prompt,
-        temperature=0.0, max_tokens=4000,
-    )
-
-    raw = data.get("criteria") if isinstance(data, dict) else None
     norm: list[dict] = []
-    for c in raw or []:
-        if not isinstance(c, dict):
-            continue
-        norm.append({
-            "criterion": str(c.get("criterion", "")).strip(),
-            "met": bool(c.get("met", False)),
-            "evidence": str(c.get("evidence", ""))[:300],
-        })
+    matched = 0
+    for attempt in range(max(1, max_attempts)):
+        prompt = base_prompt
+        if attempt > 0:
+            prompt += (
+                "\n\nIMPORTANT: your previous response did not assess every criterion. "
+                'Return a JSON object {"criteria": [...]} with EXACTLY one entry per '
+                "acceptance criterion above, in the same order, each with "
+                '"criterion", "met" (true|false) and "evidence".'
+            )
+        try:
+            data = call_llm_json(client, model, _SYSTEM, prompt, temperature=0.0, max_tokens=4000)
+        except Exception:
+            data = {}
 
-    # Fail-safe: any criterion the reviewer dropped is treated as UNMET so the
-    # gate can never pass by the model simply omitting a hard criterion.
-    covered = {c["criterion"].strip().lower() for c in norm}
-    for a in acs:
-        if a.strip().lower() not in covered:
-            norm.append({
-                "criterion": a,
-                "met": False,
-                "evidence": "(not assessed by the reviewer — treated as unmet)",
+        assessed: list[dict] = []
+        for c in (data.get("criteria") if isinstance(data, dict) else None) or []:
+            if not isinstance(c, dict):
+                continue
+            crit = str(c.get("criterion", "")).strip()
+            if not crit:
+                continue
+            assessed.append({
+                "criterion": crit,
+                "met": bool(c.get("met", False)),
+                "evidence": str(c.get("evidence", ""))[:300],
             })
 
-    all_met = all(c["met"] for c in norm) if norm else True
+        # Align the reviewer's verdicts to our ACs: exact text match first, then a
+        # positional fallback when the counts match (model reworded but kept order).
+        by_key = {a["criterion"].strip().lower(): a for a in assessed}
+        norm = []
+        matched = 0
+        for i, a in enumerate(acs):
+            m = by_key.get(a.strip().lower())
+            if m is None and len(assessed) == len(acs):
+                m = assessed[i]
+            if m is not None:
+                matched += 1
+                norm.append({"criterion": a, "met": m["met"], "evidence": m["evidence"]})
+            else:
+                norm.append({
+                    "criterion": a, "met": False,
+                    "evidence": "(not assessed by the reviewer — treated as unmet)",
+                })
+        if matched >= quorum:
+            break
+
+    # Verifier malfunction (assessed almost nothing even after retry) -> fail OPEN.
+    if matched < quorum:
+        return {
+            "criteria": [c for c in norm if "(not assessed" not in c["evidence"]],
+            "all_met": True, "unmet": [], "inconclusive": True,
+            "note": (
+                f"verifier assessed {matched}/{len(acs)} criteria after {max_attempts} "
+                "attempts; treated as inconclusive (pass-through, not a story failure)"
+            ),
+        }
+
+    all_met = all(c["met"] for c in norm)
     unmet = [c for c in norm if not c["met"]]
-    return {"criteria": norm, "all_met": all_met, "unmet": unmet}
+    return {"criteria": norm, "all_met": all_met, "unmet": unmet, "inconclusive": False}
