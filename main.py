@@ -162,7 +162,8 @@ def _run_via_supervisor(pack: StoryPack) -> bool:
         workspace_dir=workspace_dir,
         config=SupervisorConfig(
             run_tests=not fast_track,
-            run_smoke=not fast_track,
+            run_smoke=(not fast_track)
+            and os.getenv("AGENTIC_RUN_SMOKE", "1").strip().lower() not in ("0", "false", "no", "off"),
         ),
         on_progress=_on_progress,
         all_stories=list(pack.stories),

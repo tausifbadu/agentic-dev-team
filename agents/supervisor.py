@@ -60,7 +60,10 @@ class SupervisorConfig:
         default_factory=lambda: int(os.getenv("AGENTIC_MAX_TOOL_CALLS", "600"))
     )
     run_tests: bool = True
-    run_smoke: bool = True
+    run_smoke: bool = field(
+        default_factory=lambda: os.getenv("AGENTIC_RUN_SMOKE", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+    )
     # Acceptance-criteria verification: after an agent passes its DoD gate, an
     # independent reviewer checks the artifact against the story's acceptance
     # criteria. Unmet criteria are fed back for up to `max_verify_retries` retries.

@@ -634,7 +634,8 @@ def _run_agents_via_supervisor(
             config=SupervisorConfig(
                 max_pm_heal_attempts=MAX_PM_RETRIES,
                 run_tests=not fast_track,
-                run_smoke=not fast_track,
+                run_smoke=(not fast_track)
+                and os.getenv("AGENTIC_RUN_SMOKE", "1").strip().lower() not in ("0", "false", "no", "off"),
             ),
             on_progress=_on_progress,
         )
