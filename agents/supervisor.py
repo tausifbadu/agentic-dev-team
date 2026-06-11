@@ -492,6 +492,13 @@ class Supervisor:
         to the agent for up to `max_verify_retries` retries. Returns a successful
         RunResult if criteria are met, or a failure RunResult (which the caller
         routes through the normal failure/rescope path)."""
+        # Test stories are validated by the test agent's own run_pytest (its DoD
+        # gate), not by static AC review. The verifier can't confirm "tests pass"
+        # from code, and a partial run (e.g. backend-only) won't have the frontend
+        # that a generic "UI tests cover key flows" criterion expects — so verifying
+        # a testing story only yields false failures.
+        if story.ownership == "testing":
+            return result
         if not self._verification_enabled() or not (story.acceptance_criteria or []):
             return result
 
