@@ -59,6 +59,13 @@ export const api = {
   rejectStorypack: (id) =>
     request(`/storypacks/${id}/reject`, { method: "POST" }),
 
+  // Run the stories of a finished pack that haven't completed yet (or retry failed).
+  resumeStorypack: (id, options = {}) =>
+    request(`/storypacks/${id}/resume`, {
+      method: "POST",
+      body: JSON.stringify(Object.keys(options).length ? options : {}),
+    }),
+
   getAgentStatus: () => request("/agents/status"),
 
   getAgentMetrics: () => request("/agents/metrics"),

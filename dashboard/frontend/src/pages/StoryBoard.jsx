@@ -91,6 +91,25 @@ export default function StoryBoard() {
     }
   };
 
+  const handleResume = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      // No story_ids => run every story that hasn't completed yet (and retry failed).
+      const res = await api.resumeStorypack(packId, {});
+      if (res?.status === "noop") {
+        setError("All stories already completed — nothing to resume.");
+      } else {
+        refresh();
+        navigate("/agents");
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) return <p className="text-sm text-slate-500">Loading...</p>;
   if (!pack && error) return <p className="text-sm text-rose-400">{String(error)}</p>;
   if (!pack) return <p className="text-sm text-slate-500">StoryPack not found.</p>;
@@ -148,6 +167,17 @@ export default function StoryBoard() {
               {actionLoading ? "…" : "Fast track"}
             </button>
           </div>
+        )}
+        {(pack.status === "completed" || pack.status === "failed") && (
+          <button
+            type="button"
+            onClick={handleResume}
+            disabled={actionLoading}
+            title="Run the stories that haven't completed yet (and retry failed). Already-done stories are skipped."
+            className="px-4 py-2.5 text-sm font-semibold bg-accent text-white rounded-lg hover:bg-accent-hover disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-accent/50"
+          >
+            {actionLoading ? "Processing..." : "Run remaining stories"}
+          </button>
         )}
       </div>
 

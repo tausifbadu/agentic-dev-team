@@ -647,11 +647,33 @@ def _try_rescope(story: Story, cumulative_errors: str, requirement_text: str,
 
 # ── Main Pipeline ──
 
+def completed_story_ids(pack_id: str) -> set[str]:
+    """Story ids whose latest lifecycle event for this pack is story.completed.
+
+    Used by resume runs to skip work that already succeeded (and auto-included
+    dependencies that are already done). Failed stories are NOT skipped, so a
+    resume naturally retries them.
+    """
+    try:
+        comms = state_store.get_agent_comms(storypack_id=pack_id, limit=2000)
+    except Exception:
+        return set()
+    final: dict[str, str] = {}
+    for c in sorted(comms, key=lambda c: c.get("id", 0)):
+        et = c.get("event_type")
+        if et in ("story.completed", "story.failed"):
+            sid = c.get("story_id")
+            if sid:
+                final[sid] = et
+    return {sid for sid, et in final.items() if et == "story.completed"}
+
+
 def run_agents_background(
     pack_id: str,
     *,
     fast_track: bool | None = None,
     story_ids: list[str] | None = None,
+    resume: bool = False,
 ) -> None:
     """Run all agents for an approved storypack.
 
@@ -663,10 +685,13 @@ def run_agents_background(
     story_ids: when set and non-empty, only these stories (plus transitive
     prerequisites per ``Story.dependencies``) are executed. Agents still receive
     the full pack as context via ``Supervisor(all_stories=...)``.
+
+    resume: when True, stories already completed in a prior run are skipped, so a
+    follow-up run only does the pending (and any failed) stories.
     """
     ft = fast_track if fast_track is not None else _env_truthy("AGENTIC_FAST_TRACK")
     if USE_AGENTIC_SUPERVISOR:
-        return _run_agents_via_supervisor(pack_id, fast_track=ft, story_ids=story_ids)
+        return _run_agents_via_supervisor(pack_id, fast_track=ft, story_ids=story_ids, resume=resume)
     return _run_agents_legacy(pack_id, story_ids=story_ids)
 
 
@@ -675,6 +700,7 @@ def _run_agents_via_supervisor(
     *,
     fast_track: bool = False,
     story_ids: list[str] | None = None,
+    resume: bool = False,
 ) -> None:
     """New agentic runtime: instantiate Supervisor + agents and let them coordinate."""
     global execution_state, _current_run_id, _current_pack_id
@@ -699,6 +725,22 @@ def _run_agents_via_supervisor(
     except ValueError as exc:
         _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
         return
+
+    # Resume: drop stories already completed in a prior run (including
+    # auto-included dependencies that are already done — their artifacts are in
+    # the workspace and the supervisor treats a not-rerun dependency as satisfied).
+    if resume:
+        done = completed_story_ids(pack_id)
+        skipped = [s.id for s in stories if s.id in done]
+        stories = [s for s in stories if s.id not in done]
+        if skipped:
+            _log(None, "orchestrator",
+                 f"Resume: skipping {len(skipped)} already-completed stories: {', '.join(skipped)}")
+        if not stories:
+            _log(None, "orchestrator",
+                 "Resume: nothing to run — all selected stories are already completed.")
+            return
+
     requirement_text = pack["requirement_text"]
     workspace_dir = _workspace_for_pack(pack)
 
