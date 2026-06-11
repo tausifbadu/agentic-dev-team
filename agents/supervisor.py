@@ -68,7 +68,9 @@ class SupervisorConfig:
     # independent reviewer checks the artifact against the story's acceptance
     # criteria. Unmet criteria are fed back for up to `max_verify_retries` retries.
     verify_acceptance: bool = True
-    max_verify_retries: int = 1
+    max_verify_retries: int = field(
+        default_factory=lambda: int(os.getenv("AGENTIC_MAX_VERIFY_RETRIES", "1"))
+    )
 
 
 @dataclass
