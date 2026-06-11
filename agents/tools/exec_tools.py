@@ -158,6 +158,24 @@ def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
     cwd = _scratch(ctx)
     _run_pip_install(cwd)
+    # In the test agent's combined scratch the code under test lives in backend/,
+    # and test-only deps (httpx, playwright) are declared in tests/. Install both
+    # so the suite can import the app and its test tooling.
+    if (cwd / "backend").is_dir():
+        _run_pip_install(cwd / "backend")
+    if (cwd / "tests").is_dir():
+        _run_pip_install(cwd / "tests")
+
+    # Let tests import the code under test. Backend modules use top-level imports
+    # (`from main import app`), so both the scratch root and a backend/ subdir
+    # (when the test agent mirrors it) must be on PYTHONPATH.
+    env = os.environ.copy()
+    py_paths = [str(cwd)]
+    if (cwd / "backend").is_dir():
+        py_paths.append(str(cwd / "backend"))
+    if env.get("PYTHONPATH"):
+        py_paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(py_paths)
 
     try:
         result = subprocess.run(
@@ -174,6 +192,7 @@ def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             text=True,
             check=False,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         _mark_validation(ctx, "run_pytest", False)
