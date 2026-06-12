@@ -23,6 +23,12 @@ LEGACY_COMPLETIONS_MODEL_PATTERNS = ("davinci", "babbage", "cushman")
 def _model_api(model_name: str) -> str:
     """Return 'responses', 'completions', or 'chat' based on the model name."""
     lower = model_name.lower()
+    # Gateway/namespaced model ids ("provider/model", e.g. "codex/gpt-5.5") are
+    # served over the standard OpenAI chat-completions API. Treat them as chat so
+    # the "codex" heuristic below doesn't misroute them to the Responses API or
+    # trigger the gpt-4o-mini tool-loop fallback in _chat_fallback_model.
+    if "/" in lower:
+        return "chat"
     if any(pat in lower for pat in RESPONSES_MODEL_PATTERNS):
         return "responses"
     if any(pat in lower for pat in LEGACY_COMPLETIONS_MODEL_PATTERNS):
