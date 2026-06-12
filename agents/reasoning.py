@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -375,7 +376,11 @@ _SKIP_SECTIONS = {
     "tips for better results",
 }
 
-_MAX_SKILL_CHARS = 16000
+# Raised from 16000: the UI skill (~45K) was being head-truncated, dropping its
+# substantive rules (e.g. glassmorphism) and the Pre-Delivery Checklist — exactly
+# the polish guidance the frontend agent then failed to apply. Modern models have
+# ample context; inject the full skill. Tunable via AGENTIC_MAX_SKILL_CHARS.
+_MAX_SKILL_CHARS = int(os.getenv("AGENTIC_MAX_SKILL_CHARS", "60000"))
 
 
 def load_skill_guidelines(skill_path: Path) -> str:

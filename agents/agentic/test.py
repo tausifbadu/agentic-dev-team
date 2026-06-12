@@ -12,12 +12,18 @@ from typing import Optional
 from agents.agentic.base import AgentBase, RunResult
 from agents.reasoning import (
     load_json,
+    load_skill_guidelines,
     promote_scratch_copy,
     save_json,
     update_scope,
     workspace_file_tree,
 )
 from schemas import Story
+
+SKILL_TESTING_PATH = (
+    Path(__file__).parent.parent.parent / ".cursor" / "skills" / "agentic-dev-team" / "SKILL_TESTING.md"
+)
+TESTING_GUIDELINES = load_skill_guidelines(SKILL_TESTING_PATH)
 
 _TEST_COPY_IGNORE = shutil.ignore_patterns(
     "node_modules", ".venv", "__pycache__", "dist", "build", ".git", ".pytest_cache"
@@ -156,8 +162,12 @@ Write test files under tests/api/, tests/ui/, tests/integration/. After writing,
 run `run_pytest target="tests"`. Call `finish_story(success=true)` once it passes,
 or finish_story(success=false) with the blocking error if you cannot."""
 
+        system_prompt = _SYSTEM_BASE
+        if TESTING_GUIDELINES:
+            system_prompt += f"\n\nTest Engineering Guidelines:\n{TESTING_GUIDELINES}"
+
         outcome = self._execute_react(
-            system_prompt=_SYSTEM_BASE,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             registry=registry,
         )
