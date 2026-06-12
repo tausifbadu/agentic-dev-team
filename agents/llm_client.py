@@ -11,13 +11,46 @@ agent calls the `finish_story` tool.
 """
 
 import json
+import os
 import re
+import time
 from typing import Any, Callable, Optional
 
-from openai import BadRequestError, OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
 
 RESPONSES_MODEL_PATTERNS = ("codex",)
 LEGACY_COMPLETIONS_MODEL_PATTERNS = ("davinci", "babbage", "cushman")
+
+# Backoff for rate limits (429) / transient transport errors. The shared LLM
+# gateway throttles aggressively under a multi-story run; without this every
+# agent call crashes on the first 429. Tunable via env.
+_LLM_MAX_RETRIES = int(os.getenv("AGENTIC_LLM_MAX_RETRIES", "6"))
+_LLM_BACKOFF_BASE = float(os.getenv("AGENTIC_LLM_BACKOFF_BASE", "4"))
+_LLM_BACKOFF_MAX = float(os.getenv("AGENTIC_LLM_BACKOFF_MAX", "45"))
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """Honor a Retry-After header from the gateway when present."""
+    try:
+        ra = exc.response.headers.get("retry-after")  # type: ignore[attr-defined]
+        if ra:
+            return float(ra)
+    except Exception:
+        pass
+    return None
+
+
+def _backoff_delay(attempt: int, exc: Exception) -> float:
+    """Retry-After if given, else exponential backoff capped at _LLM_BACKOFF_MAX."""
+    return _retry_after_seconds(exc) or min(
+        _LLM_BACKOFF_BASE * (2 ** (attempt - 1)), _LLM_BACKOFF_MAX
+    )
 
 
 def _model_api(model_name: str) -> str:
@@ -64,6 +97,7 @@ def _chat_completions_create(
     """
     use_mc = False
     omit_temp = False
+    rl_attempts = 0
     while True:
         call_kw = {k: v for k, v in kwargs.items() if not (omit_temp and k == "temperature")}
         try:
@@ -86,6 +120,12 @@ def _chat_completions_create(
                 omit_temp = True
                 continue
             raise
+        except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
+            rl_attempts += 1
+            if rl_attempts > _LLM_MAX_RETRIES:
+                raise
+            time.sleep(_backoff_delay(rl_attempts, exc))
+            continue
 
 
 def _extract_json(text: str) -> str:
