@@ -18,10 +18,10 @@ from typing import Any, Callable, Optional
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     BadRequestError,
     OpenAI,
-    RateLimitError,
 )
 
 RESPONSES_MODEL_PATTERNS = ("codex",)
@@ -120,10 +120,20 @@ def _chat_completions_create(
                 omit_temp = True
                 continue
             raise
-        except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
-            rl_attempts += 1
-            if rl_attempts > _LLM_MAX_RETRIES:
+        except APIStatusError as exc:
+            # Retry rate limits (429) and transient gateway/server errors (5xx —
+            # includes the gateway's "provider exhausted" 502s and HTML error pages).
+            # BadRequestError (400) is handled above and re-raised, not retried.
+            status = getattr(exc, "status_code", 0) or 0
+            if (status == 429 or status >= 500) and rl_attempts < _LLM_MAX_RETRIES:
+                rl_attempts += 1
+                time.sleep(_backoff_delay(rl_attempts, exc))
+                continue
+            raise
+        except (APIConnectionError, APITimeoutError) as exc:
+            if rl_attempts >= _LLM_MAX_RETRIES:
                 raise
+            rl_attempts += 1
             time.sleep(_backoff_delay(rl_attempts, exc))
             continue
 
