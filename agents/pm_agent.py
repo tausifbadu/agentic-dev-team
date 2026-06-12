@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from openai import OpenAI
+from agents.llm_client import make_openai_client
 
 from schemas import Requirement, Story, StoryPack
 
@@ -112,7 +113,7 @@ def analyze_failure(story: Story, error_output: str, requirement_text: str) -> s
     """PM agent analyzes a developer failure and returns fix instructions."""
     from agents.llm_client import call_llm_text
 
-    client = OpenAI()
+    client = make_openai_client()
     user_prompt = f"""Story that failed:
   Title: {story.title}
   Description: {story.description}
@@ -182,7 +183,7 @@ def triage_test_failure(
     """PM triages test failure: identifies target agent, root cause, and fix instructions."""
     from agents.llm_client import call_llm_json
 
-    client = OpenAI()
+    client = make_openai_client()
     stories_summary = json.dumps(
         [{"id": s.id, "title": s.title, "ownership": s.ownership,
           "acceptance_criteria": s.acceptance_criteria}
@@ -215,7 +216,7 @@ def replan_failure(
     """PM produces a revised implementation plan after repeated failures."""
     from agents.llm_client import call_llm_text
 
-    client = OpenAI()
+    client = make_openai_client()
     user_prompt = f"""Story that keeps failing:
   Title: {story.title}
   Description: {story.description}
@@ -258,7 +259,7 @@ def rescope_story(story: Story, cumulative_errors: str, requirement_text: str) -
     """PM decides whether to simplify, skip, or halt for an unrecoverable story."""
     from agents.llm_client import call_llm_json
 
-    client = OpenAI()
+    client = make_openai_client()
     user_prompt = f"""Unrecoverable story:
   Title: {story.title}
   Description: {story.description}
@@ -356,7 +357,7 @@ def create_enhancement_story(agent_type: str, description: str, context: str = "
     """PM generates a single story from a free-text enhancement description."""
     from agents.llm_client import call_llm_json
 
-    client = OpenAI()
+    client = make_openai_client()
     prompt = ENHANCEMENT_PROMPT.replace("<AGENT_TYPE>", agent_type)
 
     user_text = f"""Enhancement request for the {agent_type} agent:
@@ -386,7 +387,7 @@ def create_enhancement_stories_both(description: str, context: str = "") -> list
     """PM generates a backend + frontend story pair for a full-stack enhancement."""
     from agents.llm_client import call_llm_json
 
-    client = OpenAI()
+    client = make_openai_client()
 
     user_text = f"""Enhancement request spanning both backend and frontend:
 
@@ -422,7 +423,7 @@ Description: {description}
 def create_stories(requirement: Requirement) -> StoryPack:
     import state_store as _ss
 
-    client = OpenAI()
+    client = make_openai_client()
 
     past_patterns = _ss.get_failure_patterns(limit=10)
     learning_addendum = ""

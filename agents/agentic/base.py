@@ -109,7 +109,8 @@ class AgentBase:
         self.ctx = ctx
         self.on_progress = on_progress or (lambda level, msg, detail=None: None)
         self.bus = ctx.bus
-        self.client = OpenAI(timeout=180)
+        from agents.llm_client import make_openai_client
+        self.client = make_openai_client()
         self.model = os.getenv(self.model_env_var, self.default_model) if self.model_env_var else self.default_model
 
         # Bus handler for incoming peer messages (must be installed by the caller

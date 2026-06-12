@@ -16,6 +16,7 @@ import re
 import time
 from typing import Any, Callable, Optional
 
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -23,6 +24,22 @@ from openai import (
     BadRequestError,
     OpenAI,
 )
+
+# Hard per-call timeout. A plain float timeout did NOT bound a stalled read once
+# (a gateway call hung ~79 min and froze the whole run). An explicit httpx.Timeout
+# bounds connect/read/write/pool so a hung connection fails fast and our backoff
+# retries instead. SDK retries are disabled here — backoff lives in
+# _chat_completions_create so the two don't compound.
+_LLM_TIMEOUT = float(os.getenv("AGENTIC_LLM_TIMEOUT", "180"))
+
+
+def make_openai_client(timeout: Optional[float] = None) -> OpenAI:
+    """Build an OpenAI client with a bounded timeout and no SDK-level retries."""
+    t = timeout if timeout is not None else _LLM_TIMEOUT
+    return OpenAI(
+        timeout=httpx.Timeout(t, connect=15.0),
+        max_retries=0,
+    )
 
 RESPONSES_MODEL_PATTERNS = ("codex",)
 LEGACY_COMPLETIONS_MODEL_PATTERNS = ("davinci", "babbage", "cushman")
