@@ -1,4 +1,4 @@
-import { Routes, Route, NavLink } from "react-router-dom";
+import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import Requirements from "./pages/Requirements";
 import StoryBoard from "./pages/StoryBoard";
 import AgentMonitor from "./pages/AgentMonitor";
@@ -23,14 +23,15 @@ const navItems = [
 ];
 
 export default function App() {
+  const location = useLocation();
   return (
     <div className="min-h-screen flex">
       <aside className="w-56 flex-shrink-0 bg-surface-1 border-r border-border flex flex-col">
         <div className="px-5 py-5">
-          <h1 className="text-base font-bold text-white tracking-tight">
+          <h1 className="text-base font-bold text-fg tracking-tight">
             Agentic Dev Team
           </h1>
-          <p className="text-[11px] text-slate-500 mt-0.5 font-medium tracking-wide uppercase">
+          <p className="text-[11px] text-fg-faint mt-0.5 font-medium tracking-wide uppercase">
             Dashboard v1
           </p>
         </div>
@@ -42,10 +43,10 @@ export default function App() {
               to={item.to}
               end={item.to === "/"}
               className={({ isActive }) =>
-                `flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150 ${
+                `relative flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150 cursor-pointer ${
                   isActive
-                    ? "bg-accent-muted text-accent-hover"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-surface-3"
+                    ? "bg-accent-muted text-accent-hover before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-accent"
+                    : "text-fg-muted hover:text-fg-secondary hover:bg-surface-3"
                 }`
               }
             >
@@ -57,14 +58,14 @@ export default function App() {
 
         <div className="px-5 py-4 border-t border-border">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-slow" />
-            <span className="text-xs text-slate-500">System Online</span>
+            <span className="w-2 h-2 rounded-full bg-accent animate-pulse-slow shadow-glow" />
+            <span className="text-xs text-fg-muted">System Online</span>
           </div>
         </div>
       </aside>
 
       <main className="flex-1 overflow-y-auto">
-        <div className="max-w-6xl mx-auto px-8 py-8">
+        <div key={location.pathname} className="max-w-6xl mx-auto px-8 py-8 animate-fade-in-up">
           <Routes>
             <Route path="/" element={<Requirements />} />
             <Route path="/stories/:packId" element={<StoryBoard />} />

@@ -1,6 +1,13 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import {
+  PageHeader,
+  Card,
+  Button,
+  Badge,
+  EmptyState,
+} from "../components/ui";
 
 const STATUS_COLUMNS = [
   { key: "pending_review", label: "Pending Review", accent: "bg-amber-400" },
@@ -110,9 +117,9 @@ export default function StoryBoard() {
     }
   };
 
-  if (loading) return <p className="text-sm text-slate-500">Loading...</p>;
-  if (!pack && error) return <p className="text-sm text-rose-400">{String(error)}</p>;
-  if (!pack) return <p className="text-sm text-slate-500">StoryPack not found.</p>;
+  if (loading) return <p className="text-sm text-fg-faint">Loading...</p>;
+  if (!pack && error) return <p className="text-sm text-status-danger-fg">{String(error)}</p>;
+  if (!pack) return <p className="text-sm text-fg-faint">StoryPack not found.</p>;
 
   const storiesByStatus = {};
   STATUS_COLUMNS.forEach((col) => (storiesByStatus[col.key] = []));
@@ -124,104 +131,97 @@ export default function StoryBoard() {
   return (
     <div className="space-y-8">
       {error && (
-        <p className="text-sm text-rose-400 bg-rose-950/40 border border-rose-500/25 rounded-lg px-4 py-2">
+        <p className="text-sm text-status-danger-fg bg-rose-950/40 border border-rose-500/25 rounded-lg px-4 py-2">
           {String(error)}
         </p>
       )}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold text-white">Story Board</h2>
-          <p className="text-sm text-slate-500 mt-1">
-            <span className="font-mono text-slate-400">{packId}</span>
-            <span className="mx-2 text-slate-600">/</span>
+      <PageHeader
+        title="Story Board"
+        subtitle={
+          <>
+            <span className="font-mono text-fg-muted">{packId}</span>
+            <span className="mx-2 text-fg-faint">/</span>
             <span className={
-              pack.status === "approved" ? "text-emerald-400" :
-              pack.status === "rejected" ? "text-rose-400" :
-              "text-amber-400"
+              pack.status === "approved" ? "text-status-success-fg" :
+              pack.status === "rejected" ? "text-status-danger-fg" :
+              "text-status-warning-fg"
             }>{pack.status.replace("_", " ")}</span>
-          </p>
-        </div>
-        {pack.status === "pending_review" && (
-          <div className="flex gap-2">
-            <button
-              onClick={handleReject}
-              disabled={actionLoading}
-              className="px-4 py-2.5 text-sm font-medium text-rose-400 rounded-lg border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-rose-500/30"
-            >
-              Reject
-            </button>
-            <button
-              onClick={() => handleApprove(false)}
-              disabled={actionLoading}
-              className="px-4 py-2.5 text-sm font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-500 disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:ring-offset-2 focus:ring-offset-surface-0"
-            >
-              {actionLoading ? "Processing..." : "Approve & Run Agents"}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleApprove(true)}
-              disabled={actionLoading}
-              title="Skips test agent phase and smoke phase"
-              className="px-4 py-2.5 text-sm font-medium text-amber-300 rounded-lg border border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
-            >
-              {actionLoading ? "…" : "Fast track"}
-            </button>
-          </div>
-        )}
-        {(pack.status === "completed" || pack.status === "failed") && (
-          <button
-            type="button"
-            onClick={handleResume}
-            disabled={actionLoading}
-            title="Run the stories that haven't completed yet (and retry failed). Already-done stories are skipped."
-            className="px-4 py-2.5 text-sm font-semibold bg-accent text-white rounded-lg hover:bg-accent-hover disabled:opacity-40 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-accent/50"
-          >
-            {actionLoading ? "Processing..." : "Run remaining stories"}
-          </button>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          <>
+            {pack.status === "pending_review" && (
+              <>
+                <Button variant="danger" size="lg" onClick={handleReject} disabled={actionLoading}>
+                  Reject
+                </Button>
+                <Button
+                  size="lg"
+                  onClick={() => handleApprove(false)}
+                  loading={actionLoading}
+                  disabled={actionLoading}
+                >
+                  {actionLoading ? "Processing..." : "Approve & Run Agents"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  onClick={() => handleApprove(true)}
+                  disabled={actionLoading}
+                  title="Skips test agent phase and smoke phase"
+                >
+                  {actionLoading ? "…" : "Fast track"}
+                </Button>
+              </>
+            )}
+            {(pack.status === "completed" || pack.status === "failed") && (
+              <Button
+                size="lg"
+                onClick={handleResume}
+                loading={actionLoading}
+                disabled={actionLoading}
+                title="Run the stories that haven't completed yet (and retry failed). Already-done stories are skipped."
+              >
+                {actionLoading ? "Processing..." : "Run remaining stories"}
+              </Button>
+            )}
+          </>
+        }
+      />
 
-      <div className="bg-surface-1 rounded-xl border border-border p-5">
-        <p className="text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-2">Requirement</p>
-        <p className="text-sm text-slate-300 whitespace-pre-wrap max-h-36 overflow-y-auto leading-relaxed">
+      <Card className="p-5">
+        <p className="text-[11px] font-medium text-fg-faint uppercase tracking-wider mb-2">Requirement</p>
+        <p className="text-sm text-fg-secondary whitespace-pre-wrap max-h-36 overflow-y-auto leading-relaxed">
           {pack.requirement_text}
         </p>
-      </div>
+      </Card>
 
       {pack.status === "pending_review" && (
-        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
+        <div className="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
           <span>
             Run{" "}
-            <span className="text-slate-200 font-medium">{selectedIds.size}</span>
+            <span className="text-fg font-medium">{selectedIds.size}</span>
             {" / "}
             {pack.stories.length} stories (prerequisite stories are added automatically).
           </span>
-          <button
-            type="button"
-            onClick={selectAllStories}
-            className="text-xs font-medium text-accent hover:underline"
-          >
+          <Button variant="ghost" size="sm" onClick={selectAllStories} className="text-accent hover:text-accent">
             Select all
-          </button>
-          <button
-            type="button"
-            onClick={clearStorySelection}
-            className="text-xs font-medium text-slate-500 hover:text-slate-300"
-          >
+          </Button>
+          <Button variant="ghost" size="sm" onClick={clearStorySelection}>
             Clear
-          </button>
+          </Button>
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         {STATUS_COLUMNS.map((col) => (
-          <div key={col.key} className="bg-surface-1 rounded-xl border border-border overflow-hidden">
+          <Card key={col.key} padded={false} className="overflow-hidden">
             <div className="px-4 py-3 border-b border-border-subtle flex items-center gap-2.5">
               <div className={`w-2 h-2 rounded-full ${col.accent}`} />
-              <h3 className="text-[13px] font-semibold text-slate-300">
+              <h3 className="text-[13px] font-semibold text-fg-secondary">
                 {col.label}
               </h3>
-              <span className="text-xs text-slate-600 font-mono ml-auto">
+              <span className="text-xs text-fg-faint font-mono ml-auto">
                 {storiesByStatus[col.key].length}
               </span>
             </div>
@@ -236,10 +236,10 @@ export default function StoryBoard() {
                 />
               ))}
               {storiesByStatus[col.key].length === 0 && (
-                <p className="text-xs text-slate-600 text-center py-8">No stories</p>
+                <EmptyState title="No stories" className="px-3 py-8" />
               )}
             </div>
-          </div>
+          </Card>
         ))}
       </div>
     </div>
@@ -269,21 +269,21 @@ function StoryCard({ story, selectable, selected, onToggleSelect }) {
         )}
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-2">
-            <p className="text-[13px] font-medium text-slate-200">{story.title}</p>
-            <span
-              className={`inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded ring-1 ring-inset whitespace-nowrap ${
+            <p className="text-[13px] font-medium text-fg">{story.title}</p>
+            <Badge
+              className={`ring-1 ring-inset whitespace-nowrap ${
                 OWNERSHIP_STYLES[story.ownership] || "bg-slate-500/15 text-slate-400 ring-slate-500/20"
               }`}
             >
               {story.ownership}
-            </span>
+            </Badge>
           </div>
-          <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">{story.description}</p>
+          <p className="text-xs text-fg-faint mt-1.5 leading-relaxed">{story.description}</p>
           {expanded && (
             <div className="mt-3 pt-3 border-t border-border-subtle space-y-2.5 text-xs">
               <div>
-                <p className="font-medium text-slate-400 mb-1">Acceptance Criteria</p>
-                <ul className="space-y-1 text-slate-500">
+                <p className="font-medium text-fg-muted mb-1">Acceptance Criteria</p>
+                <ul className="space-y-1 text-fg-faint">
                   {story.acceptance_criteria.map((ac, i) => (
                     <li key={i} className="flex gap-1.5">
                       <span className="text-accent mt-0.5 shrink-0">-</span>
@@ -294,8 +294,8 @@ function StoryCard({ story, selectable, selected, onToggleSelect }) {
               </div>
               {story.implementation_notes?.length > 0 && (
                 <div>
-                  <p className="font-medium text-slate-400 mb-1">Notes</p>
-                  <ul className="space-y-1 text-slate-500">
+                  <p className="font-medium text-fg-muted mb-1">Notes</p>
+                  <ul className="space-y-1 text-fg-faint">
                     {story.implementation_notes.map((n, i) => (
                       <li key={i} className="flex gap-1.5">
                         <span className="text-violet-400 mt-0.5 shrink-0">-</span>
@@ -306,8 +306,8 @@ function StoryCard({ story, selectable, selected, onToggleSelect }) {
                 </div>
               )}
               {story.dependencies?.length > 0 && (
-                <p className="text-slate-600">
-                  Depends on: <span className="font-mono text-slate-500">{story.dependencies.join(", ")}</span>
+                <p className="text-fg-faint">
+                  Depends on: <span className="font-mono text-fg-faint">{story.dependencies.join(", ")}</span>
                 </p>
               )}
             </div>

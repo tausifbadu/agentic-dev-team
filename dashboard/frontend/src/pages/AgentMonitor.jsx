@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { api } from "../api";
+import { PageHeader, Card, CardHeader, EmptyState } from "../components/ui";
 
 const AGENT_STYLES = {
   orchestrator: "bg-slate-500/15 text-slate-400",
@@ -122,10 +123,10 @@ export default function AgentMonitor() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-xl font-semibold text-white">Agent Monitor</h2>
-        <p className="text-sm text-slate-500 mt-1">Real-time agent execution and generated code</p>
-      </div>
+      <PageHeader
+        title="Agent Monitor"
+        subtitle="Real-time agent execution and generated code"
+      />
 
       {status && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -198,29 +199,28 @@ export default function AgentMonitor() {
             >
               Pipeline {status.conclusion === "completed" ? "Completed" : status.conclusion === "failed" ? "Failed" : "Partially Completed"}
             </p>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-fg-faint mt-0.5">
               {status.completed_stories?.length || 0} completed, {status.failed_stories?.length || 0} failed, {status.skipped_stories?.length || 0} skipped
             </p>
           </div>
         </div>
       )}
 
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
-          <h3 className="text-[13px] font-semibold text-slate-300">Live Logs</h3>
-          <span className="text-[11px] text-slate-600 font-mono">{logs.length} entries</span>
-        </div>
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader
+          title="Live Logs"
+          actions={<span className="text-[11px] text-fg-faint font-mono">{logs.length} entries</span>}
+        />
         <div
           ref={logsContainerRef}
           onScroll={handleScroll}
           className="max-h-[700px] overflow-y-auto"
         >
           {logs.length === 0 ? (
-            <div className="px-6 py-12 text-center">
-              <p className="text-sm text-slate-600">
-                No logs yet. Submit and approve a requirement to start.
-              </p>
-            </div>
+            <EmptyState
+              title="No logs yet."
+              hint="Submit and approve a requirement to start."
+            />
           ) : (
             <div className="divide-y divide-border">
               {groups.map((group) => (
@@ -229,7 +229,7 @@ export default function AgentMonitor() {
             </div>
           )}
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -259,12 +259,12 @@ function LogGroup({ group, isRunning }) {
           fill="none"
           stroke="currentColor"
           strokeWidth="1.5"
-          className={`text-slate-500 transition-transform duration-150 shrink-0 ${expanded ? "rotate-90" : ""}`}
+          className={`text-fg-faint transition-transform duration-150 shrink-0 ${expanded ? "rotate-90" : ""}`}
         >
           <polyline points="5 3 9 7 5 11" />
         </svg>
 
-        <span className="text-[13px] font-semibold text-slate-200 font-mono">
+        <span className="text-[13px] font-semibold text-fg font-mono">
           {label}
         </span>
 
@@ -287,10 +287,10 @@ function LogGroup({ group, isRunning }) {
               {group.errorCount} error{group.errorCount > 1 ? "s" : ""}
             </span>
           )}
-          <span className="text-[11px] text-slate-600 font-mono tabular-nums">
+          <span className="text-[11px] text-fg-faint font-mono tabular-nums">
             {group.logs.length} logs
           </span>
-          <span className="text-[11px] text-slate-600 font-mono tabular-nums whitespace-nowrap">
+          <span className="text-[11px] text-fg-faint font-mono tabular-nums whitespace-nowrap">
             {timeRange}
           </span>
         </span>
@@ -325,7 +325,7 @@ function LogEntry({ log }) {
         }`}
         onClick={() => hasDetail && setOpen(!open)}
       >
-        <span className="text-[11px] text-slate-600 whitespace-nowrap font-mono mt-0.5 tabular-nums">
+        <span className="text-[11px] text-fg-faint whitespace-nowrap font-mono mt-0.5 tabular-nums">
           {formatTimeShort(log.created_at)}
         </span>
         <span
@@ -336,13 +336,13 @@ function LogEntry({ log }) {
           {log.agent_type}
         </span>
         {log.story_id && (
-          <span className="text-[10px] text-slate-600 font-mono shrink-0 mt-0.5">
+          <span className="text-[10px] text-fg-faint font-mono shrink-0 mt-0.5">
             {log.story_id.replace(/^req_[a-f0-9]+_/, "")}
           </span>
         )}
         <span
           className={`flex-1 leading-relaxed ${
-            log.level === "error" ? "text-rose-400" : "text-slate-400"
+            log.level === "error" ? "text-rose-400" : "text-fg-muted"
           }`}
         >
           {log.message}
@@ -356,7 +356,7 @@ function LogEntry({ log }) {
               fill="none"
               stroke="currentColor"
               strokeWidth="1.5"
-              className={`text-slate-600 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+              className={`text-fg-faint transition-transform duration-150 ${open ? "rotate-90" : ""}`}
             >
               <polyline points="5 3 9 7 5 11" />
             </svg>
@@ -379,7 +379,7 @@ function LogEntry({ log }) {
                 </span>
               </div>
             )}
-            <pre className="p-4 bg-surface-0 text-xs text-slate-400 font-mono overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre-wrap leading-relaxed selection:bg-accent/20">
+            <pre className="p-4 bg-surface-0 text-xs text-fg-muted font-mono overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre-wrap leading-relaxed selection:bg-accent/20">
               {log.detail}
             </pre>
           </div>
@@ -427,15 +427,15 @@ function MetricCard({ label, value, accent, mono }) {
   };
 
   return (
-    <div className={`bg-surface-1 rounded-xl border ${accentMap[accent] || "border-border"} p-4`}>
-      <p className="text-[11px] text-slate-500 uppercase tracking-wider font-medium">{label}</p>
+    <Card padded={false} className={`p-4 ${accentMap[accent] || ""}`}>
+      <p className="text-[11px] text-fg-faint uppercase tracking-wider font-medium">{label}</p>
       <p
         className={`text-sm font-semibold mt-1.5 truncate ${mono ? "font-mono text-xs" : ""} ${
-          textMap[accent] || "text-slate-200"
+          textMap[accent] || "text-fg"
         }`}
       >
         {value}
       </p>
-    </div>
+    </Card>
   );
 }

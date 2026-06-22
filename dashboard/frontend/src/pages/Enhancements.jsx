@@ -1,6 +1,21 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
+import {
+  PageHeader,
+  Card,
+  CardHeader,
+  Button,
+  Badge,
+  Field,
+  Label,
+  Select,
+  Textarea,
+  EmptyState,
+} from "../components/ui";
 
+// Page-local categorical palette: enhancement lifecycle has statuses
+// (running=amber, rolled_back=sky) that intentionally differ from the shared
+// story/run STATUS_STYLES, so it stays local rather than using <StatusBadge>.
 const STATUS_STYLES = {
   pending: "bg-slate-500/15 text-slate-400",
   running: "bg-amber-500/15 text-amber-400",
@@ -64,12 +79,10 @@ export default function Enhancements() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-xl font-semibold text-white">Enhance</h2>
-        <p className="text-sm text-slate-500 mt-1">
-          Add features, update components, or extend functionality on the existing codebase
-        </p>
-      </div>
+      <PageHeader
+        title="Enhance"
+        subtitle="Add features, update components, or extend functionality on the existing codebase"
+      />
 
       {running && (
         <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
@@ -80,94 +93,85 @@ export default function Enhancements() {
         </div>
       )}
 
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border-subtle">
-          <h3 className="text-[13px] font-semibold text-slate-300">New Enhancement Request</h3>
-          <p className="text-[11px] text-slate-600 mt-0.5">
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader title="New Enhancement Request" />
+        <div className="px-5 py-4 space-y-4">
+          <p className="text-[11px] text-fg-faint -mt-1">
             Describe what you want to add or change — PM will create a story, then the agent implements it
           </p>
-        </div>
-        <div className="px-5 py-4 space-y-4">
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Project workspace
-            </label>
-            <select
+          <Field label="Project workspace" htmlFor="enh-project-select">
+            <Select
+              id="enh-project-select"
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              className="w-full max-w-md bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/40"
+              className="w-full max-w-md"
             >
               {(projects.length ? projects : [{ id: "default" }]).map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.id === "default" ? "default (workspace/)" : p.id}
                 </option>
               ))}
-            </select>
-          </div>
+            </Select>
+          </Field>
           <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Target Agent
-            </label>
+            <Label>Target Agent</Label>
             <div className="flex gap-2">
               {[
                 { value: "frontend", label: "Frontend" },
                 { value: "backend", label: "Backend" },
                 { value: "both", label: "Both" },
               ].map((t) => (
-                <button
+                <Button
                   key={t.value}
+                  variant={agentType === t.value ? "primary" : "secondary"}
+                  size="sm"
                   onClick={() => setAgentType(t.value)}
-                  className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 ${
-                    agentType === t.value
-                      ? "bg-accent text-white"
-                      : "bg-surface-2 text-slate-400 hover:text-slate-200 hover:bg-surface-3"
-                  }`}
                 >
                   {t.label}
-                </button>
+                </Button>
               ))}
             </div>
             {agentType === "both" && (
-              <p className="text-[11px] text-slate-500 mt-1.5">
+              <p className="text-[11px] text-fg-faint mt-1.5">
                 PM will create a backend + frontend story pair. Backend runs first, then frontend.
               </p>
             )}
           </div>
 
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Enhancement Description
-            </label>
-            <textarea
+          <Field label="Enhancement Description" htmlFor="enh-description">
+            <Textarea
+              id="enh-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={4}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+              className="w-full"
               placeholder='e.g. "Add a delete button to each customer card with confirmation dialog" or "Change the form layout to a two-column grid on desktop"'
             />
-          </div>
+          </Field>
 
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Additional Context <span className="text-slate-700">(optional)</span>
-            </label>
-            <textarea
+          <Field
+            label="Additional Context (optional)"
+            htmlFor="enh-context"
+          >
+            <Textarea
+              id="enh-context"
               value={context}
               onChange={(e) => setContext(e.target.value)}
               rows={2}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+              className="w-full text-xs"
               placeholder="Any error output, API details, or design reference to provide extra context..."
             />
-          </div>
+          </Field>
 
           <div className="flex items-center gap-3">
-            <button
+            <Button
+              size="sm"
               onClick={handleSubmit}
+              loading={submitting}
               disabled={submitting || !description.trim() || running}
-              className="px-5 py-2 bg-accent text-white text-xs font-semibold rounded-lg hover:bg-accent-hover transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? "Submitting..." : running ? "Enhancement Running..." : "Submit Enhancement"}
-            </button>
+            </Button>
             {submitResult && (
               <span className={`text-xs ${submitResult.ok ? "text-emerald-400" : "text-rose-400"}`}>
                 {submitResult.msg}
@@ -175,25 +179,19 @@ export default function Enhancements() {
             )}
           </div>
         </div>
-      </div>
+      </Card>
 
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border-subtle">
-          <h3 className="text-[13px] font-semibold text-slate-300">
-            Enhancement History ({enhancements.length})
-          </h3>
-        </div>
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader title={`Enhancement History (${enhancements.length})`} />
         {enhancements.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <div className="text-slate-700 mb-2">
+          <EmptyState
+            icon={
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mx-auto">
                 <path d="M12 5v14M5 12h14" strokeLinecap="round" />
               </svg>
-            </div>
-            <p className="text-sm text-slate-600">
-              No enhancements submitted yet. Use the form above to add features or update components.
-            </p>
-          </div>
+            }
+            title="No enhancements submitted yet. Use the form above to add features or update components."
+          />
         ) : (
           <div className="divide-y divide-border-subtle/50">
             {enhancements.map((enh) => (
@@ -201,7 +199,7 @@ export default function Enhancements() {
             ))}
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -241,29 +239,31 @@ function EnhancementRow({ enh, onRefresh }) {
   return (
     <div className="border-b border-border-subtle/50 last:border-b-0">
       <div
-        className="px-5 py-3 flex items-center gap-3 text-[13px] hover:bg-surface-2/40 cursor-pointer transition-colors duration-100"
+        className="px-5 py-3 flex items-center gap-3 text-[13px] hover:bg-surface-2/40 cursor-pointer transition-colors duration-150"
         onClick={() => setOpen(!open)}
       >
-        <span className="text-[11px] text-slate-600 whitespace-nowrap font-mono tabular-nums">
+        <span className="text-[11px] text-fg-faint whitespace-nowrap font-mono tabular-nums">
           {formatTime(enh.created_at)}
         </span>
-        <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${STATUS_STYLES[enh.status] || STATUS_STYLES.pending}`}>
+        <Badge className={`border-transparent ${STATUS_STYLES[enh.status] || STATUS_STYLES.pending}`}>
           {enh.status}
-        </span>
-        <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${
-          enh.agent_type === "both"
-            ? "bg-violet-500/15 text-violet-400"
-            : "bg-blue-500/15 text-blue-400"
-        }`}>
+        </Badge>
+        <Badge
+          className={`border-transparent ${
+            enh.agent_type === "both"
+              ? "bg-violet-500/15 text-violet-400"
+              : "bg-blue-500/15 text-blue-400"
+          }`}
+        >
           {enh.agent_type}
-        </span>
-        <span className="text-xs text-slate-300 flex-1 truncate">
+        </Badge>
+        <span className="text-xs text-fg-secondary flex-1 truncate">
           {enh.description?.slice(0, 80)}
           {enh.description?.length > 80 ? "..." : ""}
         </span>
         <svg
           width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"
-          className={`text-slate-600 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+          className={`text-fg-faint transition-transform duration-150 ${open ? "rotate-90" : ""}`}
         >
           <polyline points="5 3 9 7 5 11" />
         </svg>
@@ -271,42 +271,44 @@ function EnhancementRow({ enh, onRefresh }) {
       {open && (
         <div className="px-5 pb-4 space-y-3">
           <div>
-            <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Description</p>
-            <pre className="p-3 bg-surface-0 rounded-lg text-xs text-slate-300 font-mono overflow-x-auto whitespace-pre-wrap">
+            <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Description</p>
+            <pre className="p-3 bg-surface-0 rounded-lg text-xs text-fg-secondary font-mono overflow-x-auto whitespace-pre-wrap">
               {enh.description}
             </pre>
           </div>
           {enh.context && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Context</p>
-              <pre className="p-3 bg-surface-0 rounded-lg text-xs text-slate-400 font-mono overflow-x-auto whitespace-pre-wrap">
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Context</p>
+              <pre className="p-3 bg-surface-0 rounded-lg text-xs text-fg-muted font-mono overflow-x-auto whitespace-pre-wrap">
                 {enh.context}
               </pre>
             </div>
           )}
           {storyItems.length > 0 && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">
                 PM-Generated {storyItems.length > 1 ? "Stories" : "Story"}
               </p>
               <div className="space-y-2">
                 {storyItems.map((sd, idx) => (
                   <div key={idx} className="p-3 bg-surface-0 rounded-lg space-y-1.5">
                     <div className="flex items-center gap-2">
-                      <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded ${
-                        sd.ownership === "backend" ? "bg-amber-500/15 text-amber-400" : "bg-cyan-500/15 text-cyan-400"
-                      }`}>
+                      <Badge
+                        className={`border-transparent ${
+                          sd.ownership === "backend" ? "bg-amber-500/15 text-amber-400" : "bg-cyan-500/15 text-cyan-400"
+                        }`}
+                      >
                         {sd.ownership}
-                      </span>
-                      <p className="text-xs text-slate-200 font-medium">{sd.title}</p>
+                      </Badge>
+                      <p className="text-xs text-fg font-medium">{sd.title}</p>
                     </div>
                     {sd.description && (
-                      <p className="text-xs text-slate-400">{sd.description}</p>
+                      <p className="text-xs text-fg-muted">{sd.description}</p>
                     )}
                     {sd.acceptance_criteria?.length > 0 && (
                       <div className="mt-1">
-                        <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-0.5">Acceptance Criteria</p>
-                        <ul className="list-disc list-inside text-xs text-slate-400 space-y-0.5">
+                        <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-0.5">Acceptance Criteria</p>
+                        <ul className="list-disc list-inside text-xs text-fg-muted space-y-0.5">
                           {sd.acceptance_criteria.map((ac, i) => (
                             <li key={i}>{ac}</li>
                           ))}
@@ -320,7 +322,7 @@ function EnhancementRow({ enh, onRefresh }) {
           )}
           {enh.result_message && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Result</p>
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Result</p>
               <pre className={`p-3 bg-surface-0 rounded-lg text-xs font-mono overflow-x-auto whitespace-pre-wrap ${
                 enh.status === "success" ? "text-emerald-400/80" : "text-rose-400/80"
               }`}>
@@ -330,7 +332,9 @@ function EnhancementRow({ enh, onRefresh }) {
           )}
           {enh.backup_path && enh.status !== "rolled_back" && enh.status !== "running" && enh.status !== "pending" && (
             <div className="flex items-center gap-3 pt-1">
-              <button
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={async (e) => {
                   e.stopPropagation();
                   if (!confirm("Roll back workspace to the state before this enhancement? This cannot be undone.")) return;
@@ -346,18 +350,19 @@ function EnhancementRow({ enh, onRefresh }) {
                     setRolling(false);
                   }
                 }}
+                loading={rolling}
                 disabled={rolling}
-                className="px-3 py-1.5 bg-sky-500/15 text-sky-400 text-[11px] font-semibold rounded-lg hover:bg-sky-500/25 transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed border border-sky-500/20"
+                className="bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 hover:text-sky-400 border-sky-500/20"
               >
                 {rolling ? "Rolling back..." : "Rollback"}
-              </button>
+              </Button>
               {rollResult && (
                 <span className={`text-[11px] ${rollResult.ok ? "text-emerald-400" : "text-rose-400"}`}>
                   {rollResult.msg}
                 </span>
               )}
               {!rollResult && (
-                <span className="text-[10px] text-slate-600">Restore workspace to pre-enhancement state</span>
+                <span className="text-[10px] text-fg-faint">Restore workspace to pre-enhancement state</span>
               )}
             </div>
           )}
@@ -370,7 +375,7 @@ function EnhancementRow({ enh, onRefresh }) {
               <span className="text-[11px] text-sky-400 font-medium">Workspace was rolled back to pre-enhancement state</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-[10px] text-slate-600 font-mono">
+          <div className="flex items-center gap-2 text-[10px] text-fg-faint font-mono">
             <span>ID: {enh.id}</span>
             {enh.completed_at && <span> | Completed: {formatTime(enh.completed_at)}</span>}
           </div>

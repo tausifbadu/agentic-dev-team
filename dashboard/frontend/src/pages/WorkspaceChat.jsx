@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import {
+  PageHeader,
+  Card,
+  Button,
+  Spinner,
+  EmptyState,
+  Label,
+  Select,
+  Textarea,
+  Toggle,
+} from "../components/ui";
 
 function formatEvent(ev) {
   switch (ev.type) {
@@ -134,47 +145,37 @@ export default function WorkspaceChat() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold text-white">Workspace chat</h2>
-        <p className="text-sm text-slate-500 mt-1">
-          Per-project assistant: read and search the generated workspace; optional file writes (bypasses PM/Supervisor).
-        </p>
-      </div>
+      <PageHeader
+        title="Workspace chat"
+        subtitle="Per-project assistant: read and search the generated workspace; optional file writes (bypasses PM/Supervisor)."
+      />
 
       <div className="flex flex-wrap items-center gap-4">
-        <label className="text-xs text-slate-500 uppercase tracking-wider">Project</label>
-        <select
+        <Label className="mb-0">Project</Label>
+        <Select
           value={projectId}
           onChange={(e) => onProjectChange(e.target.value)}
-          className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 min-w-[220px]"
+          className="min-w-[220px]"
         >
           {(projects.length ? projects : [{ id: "default" }]).map((p) => (
             <option key={p.id} value={p.id}>
               {p.id === "default" ? "default (workspace/)" : p.id}
             </option>
           ))}
-        </select>
+        </Select>
 
-        <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={allowWrites}
-            onChange={(e) => setAllowWrites(e.target.checked)}
-            className="rounded border-border"
-          />
-          Allow file writes
-        </label>
+        <Toggle
+          checked={allowWrites}
+          onChange={(e) => setAllowWrites(e.target.checked)}
+          label="Allow file writes"
+        />
 
-        <button
-          type="button"
-          onClick={newSession}
-          className="text-sm px-3 py-2 rounded-lg border border-border text-slate-300 hover:bg-surface-2"
-        >
+        <Button variant="secondary" onClick={newSession}>
           New session
-        </button>
+        </Button>
 
         {sessionId && (
-          <span className="text-[11px] font-mono text-slate-600 truncate max-w-[200px]">{sessionId}</span>
+          <span className="text-[11px] font-mono text-fg-faint truncate max-w-[200px]">{sessionId}</span>
         )}
       </div>
 
@@ -184,21 +185,21 @@ export default function WorkspaceChat() {
         </div>
       )}
 
-      <div className="bg-surface-1 rounded-xl border border-border min-h-[420px] max-h-[55vh] overflow-y-auto p-4 space-y-3">
+      <Card padded={false} className="min-h-[420px] max-h-[55vh] overflow-y-auto p-4 space-y-3">
         {lines.length === 0 ? (
-          <p className="text-sm text-slate-600 text-center py-12">Starting session…</p>
+          <EmptyState icon={<Spinner size="md" />} title="Starting session…" />
         ) : (
           lines.map((row, i) => (
             <div
               key={i}
               className={`text-sm rounded-lg px-3 py-2 ${
                 row.role === "user"
-                  ? "bg-accent-muted/30 text-slate-100 ml-8"
+                  ? "bg-accent-muted/30 text-fg ml-8"
                   : row.role === "assistant"
-                    ? "bg-surface-2 text-slate-200 mr-8 whitespace-pre-wrap"
+                    ? "bg-surface-2 text-fg-secondary mr-8 whitespace-pre-wrap"
                     : row.role === "error"
                       ? "bg-red-500/10 text-red-200"
-                      : "bg-surface-3/50 text-slate-500 font-mono text-xs"
+                      : "bg-surface-3/50 text-fg-faint font-mono text-xs"
               }`}
             >
               {row.text}
@@ -206,10 +207,10 @@ export default function WorkspaceChat() {
           ))
         )}
         <div ref={bottomRef} />
-      </div>
+      </Card>
 
       <div className="flex gap-2">
-        <textarea
+        <Textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -221,16 +222,18 @@ export default function WorkspaceChat() {
           placeholder="Ask about the codebase, request a fix, or describe a missing UI…"
           rows={3}
           disabled={busy || !sessionId}
-          className="flex-1 bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-accent/40 resize-y min-h-[80px]"
+          className="flex-1 min-h-[80px]"
         />
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="lg"
           onClick={send}
+          loading={busy}
           disabled={busy || !sessionId || !input.trim()}
-          className="self-end px-5 py-2 rounded-lg bg-accent text-slate-950 font-semibold text-sm disabled:opacity-40"
+          className="self-end"
         >
-          {busy ? "…" : "Send"}
-        </button>
+          {busy ? "" : "Send"}
+        </Button>
       </div>
     </div>
   );

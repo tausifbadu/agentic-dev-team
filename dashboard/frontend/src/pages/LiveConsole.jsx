@@ -1,77 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-
-// EVENT_COLORS mirrors AgentComms.jsx so badges look consistent across pages.
-const EVENT_COLORS = {
-  story_assignment: "bg-blue-500/20 text-blue-400 border-blue-500/30",
-  build_result: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
-  heal_request: "bg-amber-500/20 text-amber-400 border-amber-500/30",
-  heal_request_reply: "bg-amber-500/10 text-amber-300 border-amber-500/20",
-  heal_outcome: "bg-orange-500/20 text-orange-400 border-orange-500/30",
-  heal_handoff: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  fix_instructions: "bg-purple-500/20 text-purple-400 border-purple-500/30",
-  replan: "bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30",
-  rescope_request: "bg-red-500/20 text-red-400 border-red-500/30",
-  rescope_request_reply: "bg-red-500/10 text-red-300 border-red-500/20",
-  rescope_result: "bg-rose-500/20 text-rose-400 border-rose-500/30",
-  contract_publish: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
-  triage_request: "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
-  triage_request_reply: "bg-indigo-500/10 text-indigo-300 border-indigo-500/20",
-  question: "bg-teal-500/20 text-teal-400 border-teal-500/30",
-  question_reply: "bg-teal-500/10 text-teal-300 border-teal-500/20",
-  query: "bg-teal-500/20 text-teal-400 border-teal-500/30",
-  query_reply: "bg-teal-500/10 text-teal-300 border-teal-500/20",
-  review_request: "bg-pink-500/20 text-pink-400 border-pink-500/30",
-  review_request_reply: "bg-pink-500/10 text-pink-300 border-pink-500/20",
-  message: "bg-slate-500/20 text-slate-300 border-slate-500/30",
-  question_timeout: "bg-red-500/20 text-red-400 border-red-500/30",
-  query_timeout: "bg-red-500/20 text-red-400 border-red-500/30",
-  review_request_timeout: "bg-red-500/20 text-red-400 border-red-500/30",
-  handler_error: "bg-red-500/20 text-red-400 border-red-500/30",
-  "story.completed": "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
-  "story.failed": "bg-red-500/20 text-red-400 border-red-500/30",
-  "story.assigned": "bg-blue-500/20 text-blue-400 border-blue-500/30",
-  "run.started": "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
-  "run.completed": "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
-  "run.failed": "bg-red-500/20 text-red-400 border-red-500/30",
-  "contract.published": "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
-  "smoke.completed": "bg-violet-500/20 text-violet-400 border-violet-500/30",
-};
-
-const AGENT_LABELS = {
-  orchestrator: "Orchestrator",
-  supervisor: "Supervisor",
-  pm: "PM",
-  backend: "Backend",
-  frontend: "Frontend",
-  test: "Test",
-  testing: "Test",
-};
-
-function formatTime(iso) {
-  if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    return d.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function Badge({ text, className = "" }) {
-  return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${className}`}
-    >
-      {text}
-    </span>
-  );
-}
+import { AGENT_LABELS, formatTime, eventColor } from "../lib/eventStyles";
+import { PageHeader, Card, CardHeader, Button, Badge, EmptyState } from "../components/ui";
 
 // Choose a progress-bar color based on the percentage of budget consumed.
 function gaugeColor(pct) {
@@ -87,14 +16,14 @@ function Gauge({ label, used, max, suffix = "" }) {
   return (
     <div className="bg-surface-2 rounded-lg border border-border p-4">
       <div className="flex justify-between items-baseline mb-2">
-        <span className="text-[11px] text-slate-500 uppercase tracking-wider">
+        <span className="text-[11px] text-fg-faint uppercase tracking-wider">
           {label}
         </span>
-        <span className="text-[11px] text-slate-500 font-mono">{pct}%</span>
+        <span className="text-[11px] text-fg-faint font-mono">{pct}%</span>
       </div>
-      <div className="text-2xl font-bold text-slate-100 mb-1">
+      <div className="text-2xl font-bold text-fg mb-1">
         {Number(used || 0).toLocaleString()}
-        <span className="text-slate-500 text-sm font-normal">
+        <span className="text-fg-faint text-sm font-normal">
           {" / "}
           {Number(max || 0).toLocaleString()}
           {suffix}
@@ -106,7 +35,7 @@ function Gauge({ label, used, max, suffix = "" }) {
           style={{ width: `${pct}%` }}
         />
       </div>
-      <p className="text-[11px] text-slate-500 mt-2">
+      <p className="text-[11px] text-fg-faint mt-2">
         {remaining.toLocaleString()}
         {suffix} remaining
       </p>
@@ -119,17 +48,16 @@ function StatusPill({ running, runtime }) {
     <div className="flex items-center gap-2">
       <div
         className={`w-2 h-2 rounded-full ${
-          running ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
+          running ? "bg-accent animate-pulse" : "bg-fg-faint"
         }`}
       />
-      <span className="text-sm text-slate-300">
+      <span className="text-sm text-fg-secondary">
         {running ? "Running" : "Idle"}
       </span>
       {runtime && (
-        <Badge
-          text={runtime}
-          className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30"
-        />
+        <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30">
+          {runtime}
+        </Badge>
       )}
     </div>
   );
@@ -155,7 +83,7 @@ function ConnectionPill({ state }) {
 function BreakerWarnings({ warnings }) {
   if (!warnings?.length) {
     return (
-      <div className="px-3 py-2 text-[11px] text-slate-500 bg-surface-2 rounded-lg border border-border">
+      <div className="px-3 py-2 text-[11px] text-fg-faint bg-surface-2 rounded-lg border border-border">
         All tools healthy
       </div>
     );
@@ -167,12 +95,11 @@ function BreakerWarnings({ warnings }) {
           key={i}
           className="px-3 py-2 bg-red-500/5 border border-red-500/30 rounded-lg flex items-center gap-3"
         >
-          <Badge
-            text={`${w.consecutive_failures}x fail`}
-            className="bg-red-500/20 text-red-400 border-red-500/30"
-          />
-          <span className="text-sm text-slate-200 font-mono">{w.tool_name}</span>
-          <span className="text-xs text-slate-500">
+          <Badge className="bg-red-500/20 text-red-400 border-red-500/30">
+            {`${w.consecutive_failures}x fail`}
+          </Badge>
+          <span className="text-sm text-fg font-mono">{w.tool_name}</span>
+          <span className="text-xs text-fg-faint">
             on {AGENT_LABELS[w.agent_id] || w.agent_id}
           </span>
         </div>
@@ -183,9 +110,7 @@ function BreakerWarnings({ warnings }) {
 
 function StreamRow({ row, isContinuation }) {
   const [expanded, setExpanded] = useState(false);
-  const colorClass =
-    EVENT_COLORS[row.event_type] ||
-    "bg-slate-500/20 text-slate-400 border-slate-500/30";
+  const colorClass = eventColor(row.event_type);
 
   let payload = {};
   try {
@@ -218,38 +143,38 @@ function StreamRow({ row, isContinuation }) {
         isContinuation
           ? "border-teal-500/40 bg-surface-2/40"
           : "border-transparent"
-      } hover:bg-surface-2/60 transition-colors`}
+      } hover:bg-surface-2/60 transition-colors duration-150`}
     >
-      <div className="text-[11px] text-slate-500 font-mono w-16 shrink-0 pt-0.5">
+      <div className="text-[11px] text-fg-faint font-mono w-16 shrink-0 pt-0.5">
         {formatTime(row.created_at)}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap mb-1">
-          <Badge text={row.event_type.replace(/_/g, " ")} className={colorClass} />
-          <span className="text-xs text-slate-400">
-            <span className="text-slate-500">{fromLabel}</span>
+          <Badge className={colorClass}>{row.event_type.replace(/_/g, " ")}</Badge>
+          <span className="text-xs text-fg-muted">
+            <span className="text-fg-faint">{fromLabel}</span>
             <span className="mx-1">{"\u2192"}</span>
-            <span className="text-slate-500">{toLabel}</span>
+            <span className="text-fg-faint">{toLabel}</span>
           </span>
           {row.story_id && (
-            <span className="text-[11px] text-slate-600 font-mono">
+            <span className="text-[11px] text-fg-faint font-mono">
               {row.story_id}
             </span>
           )}
         </div>
-        <p className="text-sm text-slate-200 whitespace-pre-wrap break-words">
+        <p className="text-sm text-fg whitespace-pre-wrap break-words">
           {headline}
         </p>
         {hasPayload && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="text-[11px] text-accent hover:text-accent-hover mt-1 transition-colors"
+            className="text-[11px] text-accent hover:text-accent-hover mt-1 transition-colors duration-150 cursor-pointer"
           >
             {expanded ? "Hide details" : "Show details"}
           </button>
         )}
         {expanded && hasPayload && (
-          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-slate-400 overflow-x-auto max-h-64 border border-border">
+          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-fg-muted overflow-x-auto max-h-64 border border-border animate-fade-in">
             {JSON.stringify(payload, null, 2)}
           </pre>
         )}
@@ -416,48 +341,48 @@ export default function LiveConsole() {
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-xl font-bold text-white">Live Agent Console</h2>
-          <p className="text-sm text-slate-500 mt-1">
-            Real-time agent interaction stream and runtime metrics, pushed via
-            Server-Sent Events.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <ConnectionPill state={conn} />
-          <button
-            onClick={() => setPaused((p) => !p)}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-all ${
-              paused
-                ? "bg-amber-500/20 text-amber-400 border-amber-500/30 hover:bg-amber-500/30"
-                : "bg-surface-2 text-slate-300 border-border hover:bg-surface-3"
-            }`}
-          >
-            {paused ? "Resume" : "Pause"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Live Agent Console"
+        subtitle="Real-time agent interaction stream and runtime metrics, pushed via Server-Sent Events."
+        className="flex-wrap"
+        actions={
+          <>
+            <ConnectionPill state={conn} />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setPaused((p) => !p)}
+              className={
+                paused
+                  ? "bg-amber-500/20 text-amber-400 border-amber-500/30 hover:bg-amber-500/30 hover:text-amber-400"
+                  : ""
+              }
+            >
+              {paused ? "Resume" : "Pause"}
+            </Button>
+          </>
+        }
+      />
 
       {/* Status row + budgets */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         <div className="bg-surface-1 rounded-lg border border-border p-4">
-          <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-2">
+          <p className="text-[11px] text-fg-faint uppercase tracking-wider mb-2">
             Status
           </p>
           <StatusPill running={!!exec.running} runtime={exec.runtime} />
           <div className="mt-3 space-y-1">
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[11px] text-fg-faint">
               Phase:{" "}
-              <span className="text-slate-300">{exec.phase || "—"}</span>
+              <span className="text-fg-secondary">{exec.phase || "—"}</span>
             </div>
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[11px] text-fg-faint">
               Active:{" "}
-              <span className="text-slate-300">{activeAgentLabel}</span>
+              <span className="text-fg-secondary">{activeAgentLabel}</span>
             </div>
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[11px] text-fg-faint">
               Story:{" "}
-              <span className="text-slate-300 font-mono">
+              <span className="text-fg-secondary font-mono">
                 {exec.current_story_id || "—"}
               </span>
             </div>
@@ -477,7 +402,7 @@ export default function LiveConsole() {
         />
 
         <div className="bg-surface-1 rounded-lg border border-border p-4">
-          <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-2">
+          <p className="text-[11px] text-fg-faint uppercase tracking-wider mb-2">
             Breaker Warnings
           </p>
           <BreakerWarnings warnings={breakers} />
@@ -487,12 +412,12 @@ export default function LiveConsole() {
       {/* Per-agent activity (tool calls + bus messages so PM and other
           message-only agents stay visible even with zero tool invocations). */}
       {metrics?.by_agent?.length > 0 && (
-        <div className="bg-surface-1 rounded-xl border border-border p-4">
+        <Card padded={false} className="p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-slate-300">
+            <h3 className="text-sm font-semibold text-fg-secondary">
               Per-Agent Activity
             </h3>
-            <span className="text-[11px] text-slate-500">
+            <span className="text-[11px] text-fg-faint">
               {metrics.total_tool_calls || 0} tool calls
               {" \u00b7 "}
               {metrics.total_messages || 0} bus messages
@@ -512,47 +437,46 @@ export default function LiveConsole() {
               return (
                 <div
                   key={a.agent_id}
-                  className={`px-3 py-2 rounded-lg border transition-all ${
+                  className={`px-3 py-2 rounded-lg border transition-all duration-150 ${
                     isIdle
                       ? "bg-surface-2/40 border-border opacity-60"
                       : "bg-surface-2 border-border"
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-1.5">
-                    <Badge
-                      text={label}
-                      className="bg-blue-500/20 text-blue-400 border-blue-500/30"
-                    />
+                    <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30">
+                      {label}
+                    </Badge>
                     {isIdle && (
-                      <span className="text-[10px] text-slate-600 uppercase tracking-wider">
+                      <span className="text-[10px] text-fg-faint uppercase tracking-wider">
                         idle
                       </span>
                     )}
                   </div>
                   <div className="flex items-baseline gap-3">
                     <div>
-                      <p className="text-lg font-bold text-slate-100 leading-none">
+                      <p className="text-lg font-bold text-fg leading-none">
                         {a.tool_calls}
                       </p>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider mt-0.5">
+                      <p className="text-[10px] text-fg-faint uppercase tracking-wider mt-0.5">
                         tools
                       </p>
                     </div>
                     <div>
-                      <p className="text-lg font-bold text-slate-100 leading-none">
+                      <p className="text-lg font-bold text-fg leading-none">
                         {msgs}
                       </p>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider mt-0.5">
+                      <p className="text-[10px] text-fg-faint uppercase tracking-wider mt-0.5">
                         msgs
                       </p>
                     </div>
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-2">
+                  <p className="text-[11px] text-fg-faint mt-2">
                     {okRate !== null && (
                       <span className="text-emerald-400/80">{okRate}% ok</span>
                     )}
                     {okRate !== null && msgs > 0 && (
-                      <span className="mx-1 text-slate-700">|</span>
+                      <span className="mx-1 text-fg-faint">|</span>
                     )}
                     {msgs > 0 && (
                       <span>
@@ -563,7 +487,7 @@ export default function LiveConsole() {
                     {a.tool_calls > 0 && (
                       <>
                         {(okRate !== null || msgs > 0) && (
-                          <span className="mx-1 text-slate-700">|</span>
+                          <span className="mx-1 text-fg-faint">|</span>
                         )}
                         {Math.round((a.total_ms || 0) / 1000)}s
                       </>
@@ -573,30 +497,30 @@ export default function LiveConsole() {
               );
             })}
           </div>
-        </div>
+        </Card>
       )}
 
       {/* Live interaction stream */}
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-4 py-2 bg-surface-2 border-b border-border flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-300">
-            Agent Interaction Stream
-          </h3>
-          <span className="text-[11px] text-slate-500">
-            {rows.length} event{rows.length === 1 ? "" : "s"}
-            {paused && " (paused)"}
-          </span>
-        </div>
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader
+          title="Agent Interaction Stream"
+          actions={
+            <span className="text-[11px] text-fg-faint">
+              {rows.length} event{rows.length === 1 ? "" : "s"}
+              {paused && " (paused)"}
+            </span>
+          }
+        />
         <div
           ref={streamElRef}
           onScroll={onStreamScroll}
           className="overflow-y-auto max-h-[640px] divide-y divide-border/40"
         >
           {rows.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 text-sm">
-              Waiting for agent activity. Submit a requirement or run an
-              enhancement to see live communication.
-            </div>
+            <EmptyState
+              title="Waiting for agent activity."
+              hint="Submit a requirement or run an enhancement to see live communication."
+            />
           ) : (
             renderedRows.map(({ row, isContinuation }) => (
               <StreamRow
@@ -607,7 +531,7 @@ export default function LiveConsole() {
             ))
           )}
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

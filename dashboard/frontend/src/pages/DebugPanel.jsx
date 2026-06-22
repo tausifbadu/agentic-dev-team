@@ -1,11 +1,26 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
+import {
+  PageHeader,
+  Card,
+  CardHeader,
+  Button,
+  Badge,
+  Label,
+  Textarea,
+  Select,
+  Field,
+  EmptyState,
+} from "../components/ui";
 
+// Fix-lifecycle status → badge classes. Page-local categorical palette: these
+// outcome hues (running=amber, success=emerald) differ from the shared status
+// semantics (running=blue, no `success` key), so they stay local.
 const STATUS_STYLES = {
-  pending: "bg-slate-500/15 text-slate-400",
-  running: "bg-amber-500/15 text-amber-400",
-  success: "bg-emerald-500/15 text-emerald-400",
-  failed: "bg-rose-500/15 text-rose-400",
+  pending: "bg-slate-500/15 text-slate-400 border-slate-500/25",
+  running: "bg-amber-500/15 text-amber-400 border-amber-500/25",
+  success: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
+  failed: "bg-rose-500/15 text-rose-400 border-rose-500/25",
 };
 
 export default function DebugPanel() {
@@ -60,34 +75,27 @@ export default function DebugPanel() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-xl font-semibold text-white">Debug Panel</h2>
-        <p className="text-sm text-slate-500 mt-1">
-          Review failures, paste errors, and re-run agents with fix context
-        </p>
-      </div>
+      <PageHeader
+        title="Debug Panel"
+        subtitle="Review failures, paste errors, and re-run agents with fix context"
+      />
 
       {fixStatus?.running && (
-        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
-          <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-          <span className="text-sm text-amber-400 font-medium">
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-status-warning/10 border border-status-warning/20">
+          <div className="w-2 h-2 rounded-full bg-status-warning-fg animate-pulse" />
+          <span className="text-sm text-status-warning-fg font-medium">
             Fix running: {fixStatus.agent_type} agent on story {fixStatus.story_id}
           </span>
         </div>
       )}
 
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border-subtle">
-          <h3 className="text-[13px] font-semibold text-slate-300">
-            Failed Stories ({failedItems.length})
-          </h3>
-        </div>
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader title={`Failed Stories (${failedItems.length})`} />
         {failedItems.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <p className="text-sm text-slate-600">
-              No failed stories. Run an agent pipeline first, or submit a manual fix below.
-            </p>
-          </div>
+          <EmptyState
+            title="No failed stories."
+            hint="Run an agent pipeline first, or submit a manual fix below."
+          />
         ) : (
           <div className="divide-y divide-border-subtle/50">
             {failedItems.map((item) => (
@@ -102,7 +110,7 @@ export default function DebugPanel() {
             ))}
           </div>
         )}
-      </div>
+      </Card>
 
       <ManualFixForm
         storypacks={storypacks}
@@ -114,16 +122,10 @@ export default function DebugPanel() {
         }}
       />
 
-      <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border-subtle">
-          <h3 className="text-[13px] font-semibold text-slate-300">
-            Fix History ({fixes.length})
-          </h3>
-        </div>
+      <Card padded={false} className="overflow-hidden">
+        <CardHeader title={`Fix History (${fixes.length})`} />
         {fixes.length === 0 ? (
-          <div className="px-6 py-8 text-center">
-            <p className="text-sm text-slate-600">No fix attempts yet.</p>
-          </div>
+          <EmptyState title="No fix attempts yet." />
         ) : (
           <div className="divide-y divide-border-subtle/50">
             {fixes.map((f) => (
@@ -131,7 +133,7 @@ export default function DebugPanel() {
             ))}
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -169,50 +171,43 @@ function FailedStoryCard({ item, onFixSubmitted }) {
     <div className="px-5 py-4 space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
-          <span className="inline-flex px-2 py-0.5 text-[10px] font-semibold rounded bg-rose-500/15 text-rose-400">
-            {agentType}
-          </span>
-          <span className="text-sm font-medium text-slate-200">{item.title}</span>
+          <Badge className="bg-rose-500/15 text-rose-400 border-rose-500/25">{agentType}</Badge>
+          <span className="text-sm font-medium text-fg">{item.title}</span>
         </div>
-        <span className="text-[11px] text-slate-600 font-mono">{item.storyId}</span>
+        <span className="text-[11px] text-fg-faint font-mono">{item.storyId}</span>
       </div>
 
-      <div>
-        <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-          Error / Runtime Logs
-        </label>
-        <textarea
+      <Field label="Error / Runtime Logs">
+        <Textarea
           value={errorText}
           onChange={(e) => setErrorText(e.target.value)}
           rows={4}
-          className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+          className="w-full px-3 py-2 text-xs font-mono"
           placeholder="Paste the error traceback, console output, or describe the bug..."
         />
-      </div>
+      </Field>
 
-      <div>
-        <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-          Fix Instructions (optional)
-        </label>
-        <textarea
+      <Field label="Fix Instructions (optional)">
+        <Textarea
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
           rows={2}
-          className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+          className="w-full px-3 py-2 text-xs"
           placeholder="e.g. 'Add email-validator to requirements.txt' or 'Split the concatenated files'"
         />
-      </div>
+      </Field>
 
       <div className="flex items-center gap-3">
-        <button
+        <Button
+          size="sm"
           onClick={handleSubmit}
+          loading={submitting}
           disabled={submitting || !errorText.trim()}
-          className="px-4 py-1.5 bg-accent text-white text-xs font-semibold rounded-lg hover:bg-accent-hover transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {submitting ? "Submitting..." : "Submit Fix"}
-        </button>
+        </Button>
         {result && (
-          <span className={`text-xs ${result.ok ? "text-emerald-400" : "text-rose-400"}`}>
+          <span className={`text-xs ${result.ok ? "text-status-success-fg" : "text-status-danger-fg"}`}>
             {result.msg}
           </span>
         )}
@@ -253,23 +248,20 @@ function ManualFixForm({ storypacks, selectedPack, onPackChange, onFixSubmitted 
   };
 
   return (
-    <div className="bg-surface-1 rounded-xl border border-border overflow-hidden">
+    <Card padded={false} className="overflow-hidden">
       <div className="px-5 py-3 border-b border-border-subtle">
-        <h3 className="text-[13px] font-semibold text-slate-300">Manual Fix Request</h3>
-        <p className="text-[11px] text-slate-600 mt-0.5">
+        <h3 className="text-[13px] font-semibold text-fg-secondary">Manual Fix Request</h3>
+        <p className="text-[11px] text-fg-faint mt-0.5">
           Target any story from any storypack with a custom error and instructions
         </p>
       </div>
       <div className="px-5 py-4 space-y-3">
         <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Storypack
-            </label>
-            <select
+          <Field label="Storypack">
+            <Select
               value={selectedPack || ""}
               onChange={(e) => { onPackChange(e.target.value); setStoryId(""); }}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-accent/50"
+              className="w-full px-3 py-2 text-xs"
             >
               <option value="">Select pack...</option>
               {storypacks.map((p) => (
@@ -277,16 +269,13 @@ function ManualFixForm({ storypacks, selectedPack, onPackChange, onFixSubmitted 
                   {p.id.slice(0, 8)} ({p.stories?.length || 0} stories)
                 </option>
               ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Story
-            </label>
-            <select
+            </Select>
+          </Field>
+          <Field label="Story">
+            <Select
               value={storyId}
               onChange={(e) => setStoryId(e.target.value)}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-accent/50"
+              className="w-full px-3 py-2 text-xs"
             >
               <option value="">Select story...</option>
               {stories.map((s) => (
@@ -294,66 +283,58 @@ function ManualFixForm({ storypacks, selectedPack, onPackChange, onFixSubmitted 
                   {s.title} ({s.ownership})
                 </option>
               ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-              Agent
-            </label>
-            <select
+            </Select>
+          </Field>
+          <Field label="Agent">
+            <Select
               value={agentType}
               onChange={(e) => setAgentType(e.target.value)}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-accent/50"
+              className="w-full px-3 py-2 text-xs"
             >
               <option value="backend">Backend</option>
               <option value="frontend">Frontend</option>
               <option value="testing">Testing</option>
-            </select>
-          </div>
+            </Select>
+          </Field>
         </div>
 
-        <div>
-          <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-            Error / Runtime Logs
-          </label>
-          <textarea
+        <Field label="Error / Runtime Logs">
+          <Textarea
             value={errorText}
             onChange={(e) => setErrorText(e.target.value)}
             rows={4}
-            className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+            className="w-full px-3 py-2 text-xs font-mono"
             placeholder="Paste the error traceback, console output, or describe the bug..."
           />
-        </div>
+        </Field>
 
-        <div>
-          <label className="block text-[11px] text-slate-500 uppercase tracking-wider font-medium mb-1.5">
-            Fix Instructions (optional)
-          </label>
-          <textarea
+        <Field label="Fix Instructions (optional)">
+          <Textarea
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             rows={2}
-            className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent/50 resize-y"
+            className="w-full px-3 py-2 text-xs"
             placeholder="e.g. 'Add CORS middleware' or 'CSS not loading, import styles.css in main.jsx'"
           />
-        </div>
+        </Field>
 
         <div className="flex items-center gap-3">
-          <button
+          <Button
+            size="sm"
             onClick={handleSubmit}
+            loading={submitting}
             disabled={submitting || !selectedPack || !storyId || !errorText.trim()}
-            className="px-4 py-1.5 bg-accent text-white text-xs font-semibold rounded-lg hover:bg-accent-hover transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {submitting ? "Submitting..." : "Submit Fix"}
-          </button>
+          </Button>
           {result && (
-            <span className={`text-xs ${result.ok ? "text-emerald-400" : "text-rose-400"}`}>
+            <span className={`text-xs ${result.ok ? "text-status-success-fg" : "text-status-danger-fg"}`}>
               {result.msg}
             </span>
           )}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -363,21 +344,21 @@ function FixHistoryRow({ fix }) {
   return (
     <div className="border-b border-border-subtle/50 last:border-b-0">
       <div
-        className="px-5 py-2.5 flex items-center gap-3 text-[13px] hover:bg-surface-2/40 cursor-pointer transition-colors duration-100"
+        className="px-5 py-2.5 flex items-center gap-3 text-[13px] hover:bg-surface-2/40 cursor-pointer transition-colors duration-150"
         onClick={() => setOpen(!open)}
       >
-        <span className="text-[11px] text-slate-600 whitespace-nowrap font-mono tabular-nums">
+        <span className="text-[11px] text-fg-faint whitespace-nowrap font-mono tabular-nums">
           {fix.created_at?.slice(0, 16).replace("T", " ") || ""}
         </span>
-        <span className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded ${STATUS_STYLES[fix.status] || STATUS_STYLES.pending}`}>
+        <Badge className={STATUS_STYLES[fix.status] || STATUS_STYLES.pending}>
           {fix.status}
-        </span>
-        <span className="text-xs text-slate-400 flex-1 truncate">
+        </Badge>
+        <span className="text-xs text-fg-muted flex-1 truncate">
           {fix.agent_type} / {fix.story_id?.slice(0, 8)} / attempt #{fix.attempt_number}
         </span>
         <svg
           width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"
-          className={`text-slate-600 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+          className={`text-fg-faint transition-transform duration-150 ${open ? "rotate-90" : ""}`}
         >
           <polyline points="5 3 9 7 5 11" />
         </svg>
@@ -386,7 +367,7 @@ function FixHistoryRow({ fix }) {
         <div className="px-5 pb-3 space-y-2">
           {fix.error_text && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Error</p>
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Error</p>
               <pre className="p-3 bg-surface-0 rounded-lg text-xs text-rose-400/80 font-mono overflow-x-auto max-h-[200px] overflow-y-auto whitespace-pre-wrap">
                 {fix.error_text}
               </pre>
@@ -394,15 +375,15 @@ function FixHistoryRow({ fix }) {
           )}
           {fix.user_instructions && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Instructions</p>
-              <pre className="p-3 bg-surface-0 rounded-lg text-xs text-slate-400 font-mono overflow-x-auto whitespace-pre-wrap">
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Instructions</p>
+              <pre className="p-3 bg-surface-0 rounded-lg text-xs text-fg-muted font-mono overflow-x-auto whitespace-pre-wrap">
                 {fix.user_instructions}
               </pre>
             </div>
           )}
           {fix.result_message && (
             <div>
-              <p className="text-[10px] text-slate-600 uppercase tracking-wider font-medium mb-1">Result</p>
+              <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Result</p>
               <pre className={`p-3 bg-surface-0 rounded-lg text-xs font-mono overflow-x-auto whitespace-pre-wrap ${
                 fix.status === "success" ? "text-emerald-400/80" : "text-rose-400/80"
               }`}>
