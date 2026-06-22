@@ -119,12 +119,13 @@ def _chat_completions_create(
         call_kw = {k: v for k, v in kwargs.items() if not (omit_temp and k == "temperature")}
         try:
             if use_mc:
-                return client.chat.completions.create(
+                resp = client.chat.completions.create(
                     model=model, max_completion_tokens=max_tokens, **call_kw
                 )
-            return client.chat.completions.create(
-                model=model, max_tokens=max_tokens, **call_kw
-            )
+            else:
+                resp = client.chat.completions.create(
+                    model=model, max_tokens=max_tokens, **call_kw
+                )
         except BadRequestError as exc:
             err = str(exc).lower()
             if not use_mc and (
@@ -153,6 +154,24 @@ def _chat_completions_create(
             rl_attempts += 1
             time.sleep(_backoff_delay(rl_attempts, exc))
             continue
+
+        # Some gateways return HTTP 200 with an empty `choices` list when the
+        # upstream provider is exhausted/throttled (sibling of the 502 "provider
+        # exhausted" path above). Every caller immediately indexes choices[0], so an
+        # empty list raises IndexError — in the ReAct loop that crashes the whole
+        # story, in call_llm_json it crashes PM story generation. Treat it as the
+        # transient condition it is: back off and retry on the shared retry budget,
+        # then surface a clear error rather than a bare IndexError.
+        if not getattr(resp, "choices", None):
+            if rl_attempts < _LLM_MAX_RETRIES:
+                rl_attempts += 1
+                time.sleep(_backoff_delay(rl_attempts, Exception("empty choices")))
+                continue
+            raise RuntimeError(
+                f"LLM gateway returned a response with no choices after "
+                f"{_LLM_MAX_RETRIES} retries (model={model})."
+            )
+        return resp
 
 
 def _extract_json(text: str) -> str:
