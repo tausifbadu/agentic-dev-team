@@ -389,6 +389,33 @@ def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
     return False
 
 
+def _terminate_and_drain(proc, timeout: float = 5.0) -> tuple[str, str]:
+    """Stop a still-running server Popen and drain its stdout/stderr without blocking.
+
+    Calling ``proc.stderr.read()`` on a *live* process blocks until that process
+    exits on its own — a server that bound nothing but hung during startup never
+    does, so the read hangs forever (the exact unbounded stall the per-call
+    timeouts exist to prevent). Terminating first guarantees the pipes reach EOF;
+    ``communicate()`` bounds the drain and escalates to ``kill()`` if terminate is
+    ignored. Returns ``(stdout, stderr)`` as strings, never raising.
+    """
+    if proc is None:
+        return "", ""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except Exception:  # noqa: BLE001
+            out, err = "", ""
+    except Exception:  # noqa: BLE001
+        out, err = "", ""
+    return (out or ""), (err or "")
+
+
 def _smoke_uvicorn_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Boot uvicorn against the working copy's main:app and check for startup errors.
 
@@ -419,12 +446,9 @@ def _smoke_uvicorn_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
         )
 
         if not _wait_for_port(port, timeout=30):
-            stderr = ""
-            if proc.stderr:
-                try:
-                    stderr = proc.stderr.read()
-                except Exception:
-                    pass
+            # The server never bound. It may have exited (clean failure) or be hung
+            # alive — terminate before draining so the pipe read can't block forever.
+            _, stderr = _terminate_and_drain(proc)
             _mark_validation(ctx, "smoke_uvicorn", False)
             return ToolResult(
                 ok=False,
@@ -619,7 +643,9 @@ def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             text=True,
         )
         if not _wait_for_port(port, timeout=20):
-            stderr = proc.stderr.read() if proc.stderr else ""
+            # See _terminate_and_drain: stop the process before reading its pipes so
+            # a hung-but-alive server can't block the read indefinitely.
+            _, stderr = _terminate_and_drain(proc)
             _mark_validation(ctx, "http_check", False)
             return ToolResult(
                 ok=False,
