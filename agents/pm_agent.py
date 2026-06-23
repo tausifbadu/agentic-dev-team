@@ -11,7 +11,7 @@ from agents.llm_client import make_openai_client
 
 from schemas import Requirement, Story, StoryPack
 
-MODEL_NAME = os.getenv("PM_AGENT_MODEL", "gpt-4o-mini")
+MODEL_NAME = os.getenv("PM_AGENT_MODEL", "codex/gpt-5.5")
 
 SYSTEM_PROMPT = """You are a Product Manager. Given a requirement, produce implementation-ready user stories for engineering agents.
 

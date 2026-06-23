@@ -95,7 +95,7 @@ class FrontendAgent(AgentBase):
     role_description = "Senior React/Tailwind Frontend Developer"
     workspace_subdir = "frontend"
     model_env_var = "FRONTEND_AGENT_MODEL"
-    default_model = "gpt-4o-mini"
+    default_model = "codex/gpt-5.5"
     allowed_tools = [
         "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_npm_install", "run_npm_build", "check_ui",

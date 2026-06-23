@@ -102,7 +102,7 @@ class AgentBase:
     allowed_tools: list[str] = []
     workspace_subdir: Optional[str] = None  # "backend", "frontend", "tests" or None
     model_env_var: str = ""
-    default_model: str = "gpt-4o-mini"
+    default_model: str = "codex/gpt-5.5"
     iteration_cap: int = 50
 
     def __init__(self, ctx: RunContext, on_progress: ProgressCallback = None):

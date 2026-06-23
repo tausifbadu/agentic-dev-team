@@ -41,7 +41,7 @@ TESTS_DIR = WORKSPACE / "tests"
 SCOPE_FILE = WORKSPACE / "scope.json"
 DEBUG_DIR = WORKSPACE / "debug"
 
-MODEL_NAME = os.getenv("TEST_AGENT_MODEL", "gpt-4o-mini")
+MODEL_NAME = os.getenv("TEST_AGENT_MODEL", "codex/gpt-5.5")
 MAX_RETRIES = 2
 MAX_JSON_PARSE_RETRIES = 2
 

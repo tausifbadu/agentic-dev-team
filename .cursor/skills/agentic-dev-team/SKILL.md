@@ -144,7 +144,7 @@ for attempt in range(MAX_RETRIES + 1):
 
 - **Data models**: Pydantic `BaseModel` for all structured data.
 - **LLM client**: `openai.OpenAI()` with `response_format={"type": "json_object"}`.
-- **Model selection**: Env vars `PM_AGENT_MODEL`, `FRONTEND_AGENT_MODEL`, `BACKEND_AGENT_MODEL`. Default: `gpt-4o-mini`.
+- **Model selection**: Env vars `PM_AGENT_MODEL`, `FRONTEND_AGENT_MODEL`, `BACKEND_AGENT_MODEL`. Default: `codex/gpt-5.5`.
 - **Temperature**: 0.2 for coding agents, 0.3 for PM agent.
 - **Retries**: Max 2 for JSON parse failures; max 2 for validation failures (build/pytest).
 - **Debug output**: Raw LLM responses saved to `workspace/debug/` on parse failure.

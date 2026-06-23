@@ -27,7 +27,7 @@ MAX_READ_BYTES = 160_000
 MAX_GREP_MATCHES = 50
 MAX_GREP_FILES = 400
 MAX_ITERATIONS = 18
-MODEL_NAME = os.getenv("WORKSPACE_CHAT_MODEL", "gpt-4o-mini")
+MODEL_NAME = os.getenv("WORKSPACE_CHAT_MODEL", "codex/gpt-5.5")
 
 
 def _resolve_jailed_path(root: Path, rel_path: str) -> Path:

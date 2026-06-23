@@ -85,7 +85,7 @@ class BackendAgent(AgentBase):
     role_description = "Senior FastAPI Backend Developer"
     workspace_subdir = "backend"
     model_env_var = "BACKEND_AGENT_MODEL"
-    default_model = "gpt-4o-mini"
+    default_model = "codex/gpt-5.5"
     allowed_tools = [
         "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_python", "http_check", "git_diff",

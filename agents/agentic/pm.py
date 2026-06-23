@@ -31,7 +31,7 @@ class PMAgent(AgentBase):
     agent_id = "pm"
     role_description = "Senior Product Manager / Coordinator"
     model_env_var = "PM_AGENT_MODEL"
-    default_model = "gpt-4o-mini"
+    default_model = "codex/gpt-5.5"
     allowed_tools = [
         "ask_pm", "send_message", "query_agent", "request_review",
         "read_storypack", "read_past_patterns", "record_failure_pattern", "read_logs",

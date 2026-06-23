@@ -77,10 +77,10 @@ Generated API: `http://localhost:8001/docs`
 
 ```
 OPENAI_API_KEY=sk-...
-PM_AGENT_MODEL=gpt-4o-mini
-BACKEND_AGENT_MODEL=gpt-5.3-codex
-FRONTEND_AGENT_MODEL=gpt-5.3-codex
-TEST_AGENT_MODEL=gpt-4o-mini
+PM_AGENT_MODEL=codex/gpt-5.5
+BACKEND_AGENT_MODEL=codex/gpt-5.5
+FRONTEND_AGENT_MODEL=codex/gpt-5.5
+TEST_AGENT_MODEL=codex/gpt-5.5
 ```
 
 ## 7. Common Issues
