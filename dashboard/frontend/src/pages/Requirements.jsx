@@ -10,7 +10,7 @@ import {
   Field,
   Label,
   Input,
-  Select,
+  Dropdown,
   Textarea,
   StatusBadge,
   EmptyState,
@@ -94,19 +94,16 @@ export default function Requirements() {
       <Card>
         <form onSubmit={submit} className="space-y-4">
           <div className="flex flex-wrap items-end gap-4">
-            <Field label="Project workspace" htmlFor="project-select">
-              <Select
-                id="project-select"
+            <Field label="Project workspace">
+              <Dropdown
                 value={projectId}
-                onChange={(e) => setProjectId(e.target.value)}
-                className="min-w-[180px]"
-              >
-                {(projects.length ? projects : [{ id: "default" }]).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.id === "default" ? "default (legacy workspace/)" : p.id}
-                  </option>
-                ))}
-              </Select>
+                onChange={setProjectId}
+                className="min-w-[200px]"
+                options={(projects.length ? projects : [{ id: "default" }]).map((p) => ({
+                  value: p.id,
+                  label: p.id === "default" ? "default (legacy workspace/)" : p.id,
+                }))}
+              />
             </Field>
             <div className="flex items-end gap-2">
               <Field label="New project slug" htmlFor="new-project-slug">

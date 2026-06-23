@@ -43,6 +43,36 @@ function Gauge({ label, used, max, suffix = "" }) {
   );
 }
 
+// Compact token-usage tile. The bar shows the cache-hit rate (higher = more of
+// the prompt served from cache = cheaper); the big number is total tokens for the
+// current run. Fed by the metrics snapshot's `usage` block.
+function fmtTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + "k";
+  return String(n || 0);
+}
+
+function TokenStat({ usage }) {
+  const total = usage?.total_tokens || 0;
+  const hit = Math.min(100, Math.max(0, usage?.cache_hit_pct || 0));
+  return (
+    <div className="bg-surface-2 rounded-lg border border-border p-4">
+      <div className="flex justify-between items-baseline mb-2">
+        <span className="text-[11px] text-fg-faint uppercase tracking-wider">Tokens</span>
+        <span className="text-[11px] text-fg-faint font-mono">{(usage?.calls || 0)} calls</span>
+      </div>
+      <div className="text-2xl font-bold text-fg mb-1">{fmtTokens(total)}</div>
+      <div className="h-2 bg-surface-3 rounded-full overflow-hidden">
+        <div
+          className="bg-accent h-full transition-all duration-500"
+          style={{ width: `${hit}%` }}
+        />
+      </div>
+      <p className="text-[11px] text-fg-faint mt-2">{hit}% served from cache</p>
+    </div>
+  );
+}
+
 function StatusPill({ running, runtime }) {
   return (
     <div className="flex items-center gap-2">
@@ -139,7 +169,7 @@ function StreamRow({ row, isContinuation }) {
 
   return (
     <div
-      className={`flex gap-3 px-4 py-3 border-l-2 ${
+      className={`animate-fade-in-up flex gap-3 px-4 py-3 border-l-2 ${
         isContinuation
           ? "border-teal-500/40 bg-surface-2/40"
           : "border-transparent"
@@ -174,7 +204,7 @@ function StreamRow({ row, isContinuation }) {
           </button>
         )}
         {expanded && hasPayload && (
-          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-fg-muted overflow-x-auto max-h-64 border border-border animate-fade-in">
+          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-fg-muted overflow-x-auto max-h-64 border border-border animate-scale-in origin-top">
             {JSON.stringify(payload, null, 2)}
           </pre>
         )}
@@ -325,6 +355,7 @@ export default function LiveConsole() {
 
   const exec = metrics?.execution_state || {};
   const budget = metrics?.budget || {};
+  const usage = metrics?.usage || {};
   const breakers = metrics?.breaker_warnings || [];
 
   const activeAgentLabel = AGENT_LABELS[exec.current_agent] || exec.current_agent || "—";
@@ -365,7 +396,7 @@ export default function LiveConsole() {
       />
 
       {/* Status row + budgets */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-surface-1 rounded-lg border border-border p-4">
           <p className="text-[11px] text-fg-faint uppercase tracking-wider mb-2">
             Status
@@ -400,6 +431,7 @@ export default function LiveConsole() {
           max={Math.round(budget.max_wall_seconds || 0)}
           suffix="s"
         />
+        <TokenStat usage={usage} />
 
         <div className="bg-surface-1 rounded-lg border border-border p-4">
           <p className="text-[11px] text-fg-faint uppercase tracking-wider mb-2">

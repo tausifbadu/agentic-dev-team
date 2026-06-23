@@ -33,7 +33,7 @@ function TimelineEvent({ event, isLast }) {
   const hasPayload = Object.keys(payload).length > 0;
 
   return (
-    <div className="relative flex gap-4 pb-6">
+    <div className="relative flex gap-4 pb-6 animate-fade-in">
       <div className="flex flex-col items-center">
         <div className="w-3 h-3 rounded-full bg-accent border-2 border-surface-1 z-10 mt-1.5" />
         {!isLast && (
@@ -71,7 +71,7 @@ function TimelineEvent({ event, isLast }) {
           </button>
         )}
         {expanded && hasPayload && (
-          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-fg-muted overflow-x-auto max-h-64 border border-border animate-fade-in">
+          <pre className="mt-2 p-3 bg-surface-3 rounded-lg text-xs text-fg-muted overflow-x-auto max-h-64 border border-border animate-scale-in origin-top">
             {JSON.stringify(payload, null, 2)}
           </pre>
         )}
