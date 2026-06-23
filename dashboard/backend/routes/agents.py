@@ -110,6 +110,18 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
         for k, v in failures_by_tool.items() if v >= 3
     ]
 
+    # Live token/cache usage for the current process's run (reset at each run
+    # start). cached_tokens shows how much of the prompt the gateway served from
+    # cache — the signal for whether prompt caching is engaging.
+    from agents.llm_client import usage_snapshot
+    u = usage_snapshot()
+    _pt = u.get("prompt_tokens", 0)
+    usage = {
+        **u,
+        "total_tokens": _pt + u.get("completion_tokens", 0),
+        "cache_hit_pct": round(100 * u.get("cached_tokens", 0) / _pt, 1) if _pt else 0.0,
+    }
+
     # Sort by tool_calls desc, then messages desc, so the busiest agents float
     # to the top while still showing zeroed-out agents below.
     agents_sorted = sorted(
@@ -131,6 +143,7 @@ def build_metrics_snapshot(*, recent_call_limit: int = 50) -> dict:
             for a in agents_sorted
         ),
         "budget": budget,
+        "usage": usage,
         "breaker_warnings": breaker_warnings,
     }
 

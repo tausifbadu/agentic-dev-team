@@ -46,13 +46,22 @@ def _compaction_config() -> tuple[Optional[int], int]:
     """Read working-memory compaction settings from the environment.
 
     AGENTIC_COMPACT_AT_CHARS — transcript size (chars) that triggers compaction.
-        Default 48000 (~12K tokens). Set to 0 to disable compaction entirely.
+        Default 300000 (~75K tokens). Set to 0 to disable compaction entirely.
+
+        Why so high: compaction REWRITES the message prefix (folds old rounds into
+        a rolling summary), which busts the gateway's prompt cache — every
+        post-compaction request reprocesses the whole prompt at full price instead
+        of ~10% cached. It also loses detail the agent needs (a starvation source).
+        On a large-context model an append-only transcript stays cached and cheap,
+        so we only compact as a last resort near the context limit rather than at
+        the old 48K (~12K-token) trip-wire that fired constantly. Tune down only if
+        you actually approach the model's context window.
     AGENTIC_KEEP_LAST_ROUNDS — most-recent rounds kept verbatim. Default 6.
     """
     try:
-        threshold = int(os.getenv("AGENTIC_COMPACT_AT_CHARS", "48000"))
+        threshold = int(os.getenv("AGENTIC_COMPACT_AT_CHARS", "300000"))
     except ValueError:
-        threshold = 48000
+        threshold = 300000
     try:
         keep = int(os.getenv("AGENTIC_KEEP_LAST_ROUNDS", "6"))
     except ValueError:

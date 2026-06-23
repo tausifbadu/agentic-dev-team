@@ -52,6 +52,84 @@ _LLM_BACKOFF_BASE = float(os.getenv("AGENTIC_LLM_BACKOFF_BASE", "4"))
 _LLM_BACKOFF_MAX = float(os.getenv("AGENTIC_LLM_BACKOFF_MAX", "45"))
 
 
+# ---------------------------------------------------------------------------
+# Token-usage telemetry
+# ---------------------------------------------------------------------------
+# Process-global accumulator. The runtime is single-run and sequential, so a
+# module global is enough: the supervisor snapshots deltas around each story to
+# attribute tokens per story, and reads the totals at run end. `cached_tokens`
+# surfaces how much of the prompt the gateway served from cache — the key signal
+# for whether our prefix is stable enough to benefit from prompt caching.
+_USAGE = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+
+
+def record_usage(usage: Any) -> None:
+    """Accumulate token counts from a response `usage` object.
+
+    Handles both the chat/completions shape (`prompt_tokens` / `completion_tokens`
+    / `prompt_tokens_details.cached_tokens`) and the Responses-API shape
+    (`input_tokens` / `output_tokens` / `input_tokens_details.cached_tokens`).
+    Best-effort: never raises into the call path.
+    """
+    if usage is None:
+        return
+    try:
+        pt = int(getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0)
+        ct = int(getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0)
+        cached = 0
+        for attr in ("prompt_tokens_details", "input_tokens_details"):
+            details = getattr(usage, attr, None)
+            if details is not None:
+                cached = int(getattr(details, "cached_tokens", 0) or 0)
+                break
+        _USAGE["calls"] += 1
+        _USAGE["prompt_tokens"] += pt
+        _USAGE["completion_tokens"] += ct
+        _USAGE["cached_tokens"] += cached
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def usage_snapshot() -> dict:
+    """Current cumulative totals (copy)."""
+    return dict(_USAGE)
+
+
+def usage_delta(before: dict) -> dict:
+    """Counts accumulated since the `before` snapshot, plus a cache_hit_pct."""
+    d = {k: _USAGE.get(k, 0) - int(before.get(k, 0)) for k in _USAGE}
+    pt = d.get("prompt_tokens", 0)
+    d["total_tokens"] = pt + d.get("completion_tokens", 0)
+    d["cache_hit_pct"] = round(100 * d.get("cached_tokens", 0) / pt, 1) if pt else 0.0
+    return d
+
+
+def reset_usage() -> None:
+    for k in _USAGE:
+        _USAGE[k] = 0
+
+
+# Per-tool-result size fed back to the model. Sits on top of each tool's own
+# trimming. Middle-out (head + larger tail) rather than a head cut, because
+# errors/tracebacks live at the END of command output — head-truncating them
+# leaves the agent unable to diagnose failures, so it loops and burns iterations.
+_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENTIC_TOOL_RESULT_MAX_CHARS", "24000"))
+
+
+def _clip_tool_result(text: str, limit: int = _TOOL_RESULT_MAX_CHARS) -> str:
+    if not text or len(text) <= limit:
+        return text
+    head = limit // 3
+    tail = limit - head
+    elided = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n\n... [{elided} chars elided from the middle — "
+        "read_file offset/limit or run_python to inspect more] ...\n\n"
+        + text[-tail:]
+    )
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     """Honor a Retry-After header from the gateway when present."""
     try:
@@ -76,7 +154,7 @@ def _model_api(model_name: str) -> str:
     # Gateway/namespaced model ids ("provider/model", e.g. "codex/gpt-5.5") are
     # served over the standard OpenAI chat-completions API. Treat them as chat so
     # the "codex" heuristic below doesn't misroute them to the Responses API or
-    # trigger the gpt-4o-mini tool-loop fallback in _chat_fallback_model.
+    # trigger the chat-fallback model in _chat_fallback_model.
     if "/" in lower:
         return "chat"
     if any(pat in lower for pat in RESPONSES_MODEL_PATTERNS):
@@ -171,6 +249,7 @@ def _chat_completions_create(
                 f"LLM gateway returned a response with no choices after "
                 f"{_LLM_MAX_RETRIES} retries (model={model})."
             )
+        record_usage(getattr(resp, "usage", None))
         return resp
 
 
@@ -218,6 +297,7 @@ def call_llm_text(
                 )
             else:
                 raise
+        record_usage(getattr(response, "usage", None))
         return (response.output_text or "").strip()
 
     if api == "completions":
@@ -237,6 +317,7 @@ def call_llm_text(
                 )
             else:
                 raise
+        record_usage(getattr(response, "usage", None))
         return (response.choices[0].text or "").strip()
 
     response = _chat_completions_create(
@@ -339,6 +420,7 @@ Respond with valid JSON only. No markdown fences. No commentary."""
                 prompt=prompt,
                 max_tokens=max_tokens,
             )
+        record_usage(getattr(response, "usage", None))
         content = (response.choices[0].text or "").strip()
         extracted = _extract_json(content)
         try:
@@ -380,6 +462,7 @@ def _call_responses_json(
                 max_output_tokens=max_tokens,
                 text={"format": {"type": "json_object"}},
             )
+        record_usage(getattr(response, "usage", None))
         content = (response.output_text or "").strip()
         extracted = _extract_json(content)
         try:
@@ -557,7 +640,7 @@ def call_llm_with_tools(
     Falls back to chat-completions tool calling for non-Responses models. For
     Responses-API models we still use chat tooling because the Responses API's
     function-calling shape differs and the agents in this project have access
-    to chat-capable models (gpt-4o-mini, etc.).
+    to chat-capable models (codex/gpt-5.5, etc.).
     """
     # Force chat-style tool calling regardless of model API. This keeps the loop
     # uniform across model families and works for every model used in this repo.
@@ -674,7 +757,7 @@ def call_llm_with_tools(
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "name": tool_name,
-                    "content": invocation.content_for_model[:8000],
+                    "content": _clip_tool_result(invocation.content_for_model),
                 })
                 if is_finished:
                     try:
@@ -704,15 +787,23 @@ def call_llm_with_tools(
     )
 
 
+# Model used to drive the chat-style tool loop when the configured model can't do
+# it directly (Responses-API and legacy-completions models don't support the
+# chat-completions function-calling shape the ReAct loop relies on). Env-tunable;
+# defaults to the gateway's gpt-5.5. Chat models pass through untouched.
+_CHAT_FALLBACK_MODEL = os.getenv("AGENTIC_CHAT_FALLBACK_MODEL", "codex/gpt-5.5")
+
+
 def _chat_fallback_model(model: str) -> str:
-    """If the configured model is a Responses-API model with no chat function-calling support,
-    fall back to gpt-4o-mini for the tool loop. Modern chat models pass through unchanged."""
+    """If the configured model can't drive the chat-style tool loop (a Responses-API
+    or legacy-completions model), fall back to _CHAT_FALLBACK_MODEL (default
+    codex/gpt-5.5). Modern chat models pass through unchanged."""
     if not model:
-        return "gpt-4o-mini"
+        return _CHAT_FALLBACK_MODEL
     if is_responses_model(model):
-        return "gpt-4o-mini"
+        return _CHAT_FALLBACK_MODEL
     if is_completions_model(model):
-        return "gpt-4o-mini"
+        return _CHAT_FALLBACK_MODEL
     return model
 
 

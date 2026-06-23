@@ -39,6 +39,7 @@ from agents.agentic import (
     TestAgent,
 )
 from agents.bus import MessageBus
+from agents.llm_client import reset_usage, usage_delta, usage_snapshot
 from agents.reasoning import extract_api_contract, save_json
 from schemas import Story
 import state_store
@@ -158,6 +159,7 @@ class Supervisor:
 
     def run(self) -> SupervisorResult:
         started = time.monotonic()
+        reset_usage()  # zero the token telemetry so this run's totals are clean
         self._log("supervisor", "info",
                   f"Run {self.run_id} starting with {len(self.stories)} stories.")
         self.bus.publish(
@@ -180,7 +182,9 @@ class Supervisor:
                 if self._budget_exceeded():
                     self._abort_remaining(backend_stories[idx:], "run budget exceeded")
                     break
+                before = usage_snapshot()
                 self._run_story(self.backend, story)
+                self._log_story_tokens(story, before)
 
             # After backend phase, publish the contract for frontend agents to consume.
             if any(o.status == "passed" for sid, o in self.outcomes.items()
@@ -198,7 +202,9 @@ class Supervisor:
                 if not self._dependencies_satisfied(story):
                     self._mark_skipped(story, "Skipped: backend dependency failed")
                     continue
+                before = usage_snapshot()
                 self._run_story(self.frontend, story)
+                self._log_story_tokens(story, before)
 
             # Phase 3: Test suite (one run validates the whole pack).
             test_outcome: Optional[StoryOutcome] = None
@@ -208,7 +214,9 @@ class Supervisor:
                     self._abort_remaining(test_stories, "run budget exceeded")
                 else:
                     test_story = test_stories[0] if test_stories else _make_synthetic_test_story()
+                    before = usage_snapshot()
                     test_outcome = self._run_story(self.test, test_story)
+                    self._log_story_tokens(test_story, before)
                     # Mirror the single test-suite outcome onto every testing story
                     # so they are all accounted for instead of silently missing.
                     self._propagate_test_outcome(test_story, test_stories)
@@ -654,10 +662,30 @@ class Supervisor:
         passed = sum(1 for o in self.outcomes.values() if o.status == "passed")
         skipped = sum(1 for o in self.outcomes.values() if o.status == "skipped")
         failed = sum(1 for o in self.outcomes.values() if o.status == "failed")
+        u = usage_snapshot()
+        tot = u["prompt_tokens"] + u["completion_tokens"]
+        hit = round(100 * u["cached_tokens"] / u["prompt_tokens"], 1) if u["prompt_tokens"] else 0.0
         return (
             f"Run {self.run_id} {'succeeded' if success else 'finished with failures'}: "
             f"{passed} passed, {failed} failed, {skipped} skipped, "
-            f"{self.budget.tool_calls_used} tool calls."
+            f"{self.budget.tool_calls_used} tool calls, "
+            f"{tot:,} tokens across {u['calls']} LLM calls (cache hit {hit}%)."
+        )
+
+    def _log_story_tokens(self, story: Story, before: dict) -> None:
+        """Log the token cost attributed to a single story (delta since `before`).
+        The cache-hit % shows whether the prompt cache is actually engaging — a low
+        number on a long story means the prefix is being busted (e.g. by compaction)."""
+        if story is None:
+            return
+        d = usage_delta(before)
+        if d.get("total_tokens", 0) <= 0:
+            return
+        self._log(
+            "supervisor", "info",
+            f"Tokens · {story.title}: {d['total_tokens']:,} "
+            f"(prompt {d['prompt_tokens']:,} / completion {d['completion_tokens']:,}, "
+            f"cache hit {d['cache_hit_pct']}%)",
         )
 
     def _log(self, agent: str, level: str, msg: str, detail: Optional[str] = None) -> None:

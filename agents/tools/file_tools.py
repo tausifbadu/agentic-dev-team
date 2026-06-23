@@ -55,18 +55,46 @@ def _read_file_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     except OSError as exc:
         return ToolResult(ok=False, content=f"Could not read {rel}: {exc}")
 
-    truncated = False
+    byte_truncated = False
     if len(data) > MAX_READ_BYTES:
         data = data[:MAX_READ_BYTES]
-        truncated = True
+        byte_truncated = True
 
     text = data.decode("utf-8", errors="replace")
-    if truncated:
-        text += f"\n\n... (truncated at {MAX_READ_BYTES} bytes)"
+
+    # Optional line-range pagination so large files stay navigable instead of being
+    # silently clipped to the head. `offset` is 1-based; `limit` is a line count.
+    # When the agent only gets the head of a big file it can't see the code it must
+    # modify — this lets it page through (read more with offset=<next line>).
+    offset = args.get("offset")
+    limit = args.get("limit")
+    notes: list[str] = []
+    if byte_truncated:
+        notes.append(f"file exceeds {MAX_READ_BYTES} bytes; showing first {MAX_READ_BYTES}")
+    if offset is not None or limit is not None:
+        lines = text.split("\n")
+        total = len(lines)
+        try:
+            start = max(1, int(offset)) if offset is not None else 1
+        except (TypeError, ValueError):
+            start = 1
+        try:
+            count = max(0, int(limit)) if limit is not None else total
+        except (TypeError, ValueError):
+            count = total
+        end = min(total, start - 1 + count) if count else total
+        window = lines[start - 1:end]
+        text = "\n".join(window)
+        notes.append(f"lines {start}-{start - 1 + len(window)} of {total}")
+        if end < total:
+            notes.append(f"read more with offset={end + 1}")
+
+    if notes:
+        text += "\n\n... (" + "; ".join(notes) + ")"
     return ToolResult(
         ok=True,
         content=text,
-        metadata={"path": rel, "bytes": len(data), "truncated": truncated},
+        metadata={"path": rel, "bytes": len(data), "truncated": byte_truncated},
     )
 
 
@@ -270,11 +298,17 @@ def _apply_patch_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def register_file_tools(registry: ToolRegistry) -> None:
     registry.register(Tool(
         name="read_file",
-        description="Read a UTF-8 text file from the agent's working copy. Returns the file contents.",
+        description=(
+            "Read a UTF-8 text file from the agent's working copy. Returns the file "
+            "contents. For large files, page through with `offset` (1-based start "
+            "line) and `limit` (number of lines) instead of getting only the head."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path relative to the working copy root"},
+                "offset": {"type": "integer", "minimum": 1, "description": "1-based line to start reading from (optional)"},
+                "limit": {"type": "integer", "minimum": 1, "description": "Max number of lines to return from offset (optional)"},
             },
             "required": ["path"],
             "additionalProperties": False,
