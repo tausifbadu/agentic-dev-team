@@ -10,6 +10,9 @@ export default {
       fontFamily: {
         sans: ["Inter", "system-ui", "-apple-system", "sans-serif"],
         mono: ["JetBrains Mono", "Fira Code", "Menlo", "monospace"],
+        // Display face for headings / hero moments — a geometric grotesk with
+        // more character than Inter, used sparingly (e.g. the PM-thinking overlay).
+        display: ["Space Grotesk", "Inter", "system-ui", "sans-serif"],
       },
       colors: {
         // Surface ramp: app background → raised cards/inputs → hover/active.

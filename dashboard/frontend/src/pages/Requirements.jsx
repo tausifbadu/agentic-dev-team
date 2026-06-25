@@ -15,6 +15,7 @@ import {
   StatusBadge,
   EmptyState,
 } from "../components/ui";
+import PmThinking from "../components/PmThinking";
 
 export default function Requirements() {
   const [requirements, setRequirements] = useState([]);
@@ -25,6 +26,10 @@ export default function Requirements() {
   const [autoApprove, setAutoApprove] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // PM "thinking" overlay: pmActive mounts it while the blocking submit is in
+  // flight; storyCount flips it to the success state just before we navigate.
+  const [pmActive, setPmActive] = useState(false);
+  const [storyCount, setStoryCount] = useState(null);
   const navigate = useNavigate();
 
   const [newProjectSlug, setNewProjectSlug] = useState("");
@@ -53,17 +58,26 @@ export default function Requirements() {
     }
   };
 
+  // Show the PM-thinking success pop briefly before leaving the page.
+  const finishWithStories = (result) => {
+    setStoryCount(result.stories?.length ?? 0);
+    refresh();
+    setTimeout(() => navigate(`/stories/${result.storypack_id}`), 900);
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (!text.trim()) return;
     setLoading(true);
     setError(null);
+    setStoryCount(null);
+    setPmActive(true);
     try {
       const result = await api.submitRequirement(text.trim(), autoApprove, { project_id: projectId });
       setText("");
-      refresh();
-      navigate(`/stories/${result.storypack_id}`);
+      finishWithStories(result);
     } catch (err) {
+      setPmActive(false);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -73,11 +87,13 @@ export default function Requirements() {
   const submitFromFile = async (filename) => {
     setLoading(true);
     setError(null);
+    setStoryCount(null);
+    setPmActive(true);
     try {
       const result = await api.submitFromFile(filename, autoApprove, { project_id: projectId });
-      refresh();
-      navigate(`/stories/${result.storypack_id}`);
+      finishWithStories(result);
     } catch (err) {
+      setPmActive(false);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -86,6 +102,7 @@ export default function Requirements() {
 
   return (
     <div className="space-y-8">
+      <PmThinking active={pmActive} storyCount={storyCount} />
       <PageHeader
         title="Requirements"
         subtitle="Submit a new requirement or load from a prompt file"
