@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import httpx
@@ -31,6 +32,15 @@ from openai import (
 # retries instead. SDK retries are disabled here — backoff lives in
 # _chat_completions_create so the two don't compound.
 _LLM_TIMEOUT = float(os.getenv("AGENTIC_LLM_TIMEOUT", "180"))
+
+# Stream chat completions. The httpx read timeout (_LLM_TIMEOUT) bounds a single
+# read; for a non-streamed call that read is the WHOLE response, so a slow
+# reasoning generation (e.g. the PM storypack, up to 16k tokens) trips the timeout
+# even when the gateway is healthy. Streaming makes the read timeout bound the gap
+# BETWEEN chunks instead — a long generation never trips it as long as tokens keep
+# flowing. Set AGENTIC_LLM_STREAM=0 to fall back to blocking calls if a gateway
+# misbehaves with SSE.
+_LLM_STREAM = os.getenv("AGENTIC_LLM_STREAM", "1") not in ("0", "false", "False", "")
 
 
 def make_openai_client(timeout: Optional[float] = None) -> OpenAI:
@@ -180,6 +190,78 @@ def _temperature_unsupported_error(err: str) -> bool:
     )
 
 
+def _consume_stream(stream: Any):
+    """Drain a streamed chat completion into a non-streamed response shape.
+
+    Reconstructs ``choices[0].message.content``, ``.tool_calls``,
+    ``choices[0].finish_reason`` and ``.usage`` so every caller can treat the
+    result exactly like a blocking ``chat.completions.create`` response. The
+    iteration here is where per-chunk reads happen, so a stalled gateway raises
+    ``APITimeoutError`` mid-stream and the caller's backoff handles it.
+
+    Returns an object whose ``choices`` is empty when the stream carried no
+    content, tool calls, or finish_reason (the gateway's "exhausted" sibling of
+    an empty-choices non-streamed response) so the existing retry path triggers.
+    """
+    content_parts: list[str] = []
+    tool_calls_acc: dict[int, dict] = {}
+    finish_reason: Optional[str] = None
+    usage = None
+    role = "assistant"
+
+    for chunk in stream:
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+        for choice in (getattr(chunk, "choices", None) or []):
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            if getattr(delta, "role", None):
+                role = delta.role
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                idx = getattr(tc, "index", 0) or 0
+                slot = tool_calls_acc.setdefault(
+                    idx, {"id": None, "type": "function", "name": "", "args": ""}
+                )
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                if getattr(tc, "type", None):
+                    slot["type"] = tc.type
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["args"] += fn.arguments
+
+    tool_calls = [
+        SimpleNamespace(
+            id=slot["id"],
+            type=slot["type"] or "function",
+            function=SimpleNamespace(name=slot["name"], arguments=slot["args"]),
+        )
+        for _, slot in sorted(tool_calls_acc.items())
+    ]
+    content = "".join(content_parts)
+
+    # Nothing meaningful came back — surface as empty choices so the caller's
+    # transient-retry path kicks in rather than returning a hollow message.
+    if not content and not tool_calls and finish_reason is None:
+        return SimpleNamespace(choices=[], usage=usage)
+
+    message = SimpleNamespace(
+        role=role,
+        content=content or None,
+        tool_calls=tool_calls or None,
+    )
+    choice = SimpleNamespace(index=0, message=message, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
 def _chat_completions_create(
     client: OpenAI,
     *,
@@ -192,18 +274,25 @@ def _chat_completions_create(
     """
     use_mc = False
     omit_temp = False
+    stream = _LLM_STREAM
+    omit_stream_opts = False
     rl_attempts = 0
     while True:
         call_kw = {k: v for k, v in kwargs.items() if not (omit_temp and k == "temperature")}
+        token_kw = (
+            {"max_completion_tokens": max_tokens} if use_mc else {"max_tokens": max_tokens}
+        )
+        if stream:
+            call_kw["stream"] = True
+            if not omit_stream_opts:
+                # Ask the gateway to emit a final usage chunk so token telemetry
+                # survives streaming.
+                call_kw["stream_options"] = {"include_usage": True}
         try:
-            if use_mc:
-                resp = client.chat.completions.create(
-                    model=model, max_completion_tokens=max_tokens, **call_kw
-                )
-            else:
-                resp = client.chat.completions.create(
-                    model=model, max_tokens=max_tokens, **call_kw
-                )
+            raw = client.chat.completions.create(model=model, **token_kw, **call_kw)
+            # Iterating the stream is where per-chunk reads (and thus read
+            # timeouts) happen, so keep it inside the try for the retry handlers.
+            resp = _consume_stream(raw) if stream else raw
         except BadRequestError as exc:
             err = str(exc).lower()
             if not use_mc and (
@@ -214,6 +303,14 @@ def _chat_completions_create(
                 continue
             if not omit_temp and _temperature_unsupported_error(str(exc)):
                 omit_temp = True
+                continue
+            # Some gateways reject stream_options (or streaming itself) with a 400.
+            # Degrade gracefully: drop the option first, then disable streaming.
+            if stream and not omit_stream_opts and "stream_options" in err:
+                omit_stream_opts = True
+                continue
+            if stream and "stream" in err:
+                stream = False
                 continue
             raise
         except APIStatusError as exc:
