@@ -21,6 +21,43 @@ def _read_storypack_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
     return ToolResult(ok=True, content=json.dumps(pack, indent=2, default=str))
 
 
+def _read_guidelines_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Return the agent's engineering/design skill guidelines on demand.
+
+    Tier B: agents stuff their (large) skill text into ctx.metadata["guidelines"]
+    instead of baking it into the re-sent system prompt, then pull it ONCE via this
+    tool. The result enters the transcript once and is later compacted away, rather
+    than being re-paid on every ReAct turn against a gateway with no prompt caching.
+    """
+    text = ctx.metadata.get("guidelines") or ""
+    if not text.strip():
+        return ToolResult(ok=True, content="(no detailed guidelines configured for this agent)")
+    return ToolResult(ok=True, content=text)
+
+
+def _workspace_overview_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Return the workspace file tree + public export map in one call.
+
+    Tier B: replaces the file-tree + export-map blocks that used to ride in the
+    re-sent user prompt. The agent calls this once to orient itself.
+    """
+    from pathlib import Path
+    from agents.reasoning import workspace_file_tree, workspace_export_map
+
+    target = ctx.metadata.get("backend_dir") or ctx.metadata.get("workspace_dir")
+    if not target:
+        return ToolResult(ok=False, content="No workspace directory available")
+    suffixes = set(ctx.metadata.get("overview_suffixes") or [".py"])
+    tree = workspace_file_tree(Path(target), suffixes)
+    exports = workspace_export_map(Path(target), suffixes)
+    body = (
+        f"Files (suffixes {sorted(suffixes)}):\n{tree or '(empty workspace)'}\n\n"
+        f"Public export map (symbols you MUST preserve when rewriting files):\n"
+        f"{exports or '(no exports detected)'}"
+    )
+    return ToolResult(ok=True, content=body)
+
+
 def _read_past_patterns_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     import state_store
 
@@ -87,6 +124,24 @@ def _read_api_contract_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolRe
 
 
 def register_state_tools(registry: ToolRegistry) -> None:
+    registry.register(Tool(
+        name="read_guidelines",
+        description=(
+            "Read the detailed engineering/design guidelines for your role (FastAPI, "
+            "React/UI, testing, etc.). Call this ONCE near the start before writing code."
+        ),
+        parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=_read_guidelines_handler,
+    ))
+    registry.register(Tool(
+        name="workspace_overview",
+        description=(
+            "Get the current workspace file tree and the public export map (functions/"
+            "classes you must preserve) in one call. Use this once to orient yourself."
+        ),
+        parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=_workspace_overview_handler,
+    ))
     registry.register(Tool(
         name="read_storypack",
         description="Read the full storypack (all stories) for the current run.",

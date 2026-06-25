@@ -86,7 +86,7 @@ class TestAgent(AgentBase):
         "run_pytest",
         "run_python", "http_check", "git_diff",
         "ask_pm", "query_agent", "send_message",
-        "read_storypack", "read_past_patterns", "read_logs", "read_api_contract",
+        "read_storypack", "read_past_patterns", "read_api_contract",
         "finish_story",
     ]
     iteration_cap = 50

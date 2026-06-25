@@ -376,11 +376,16 @@ _SKIP_SECTIONS = {
     "tips for better results",
 }
 
-# Raised from 16000: the UI skill (~45K) was being head-truncated, dropping its
-# substantive rules (e.g. glassmorphism) and the Pre-Delivery Checklist — exactly
-# the polish guidance the frontend agent then failed to apply. Modern models have
-# ample context; inject the full skill. Tunable via AGENTIC_MAX_SKILL_CHARS.
-_MAX_SKILL_CHARS = int(os.getenv("AGENTIC_MAX_SKILL_CHARS", "60000"))
+# Per-skill char cap on guidelines injected into the (re-sent-every-turn) system
+# prompt. This was once raised to 60000 ("inject the full skill — modern models
+# have ample context"), but that assumed CHEAP context. This gateway does NOT
+# cache prompts, so the full skill is re-paid on every ReAct iteration: the 45K UI
+# skill alone is ~11K tokens × ~16 turns ≈ 175K tokens for one frontend story.
+# 8000 chars (~2K tokens) caps that. TRADE-OFF: blunt head-truncation can drop
+# later rules (the UI skill's Pre-Delivery Checklist lives near the end), so
+# frontend polish may regress — raise AGENTIC_MAX_SKILL_CHARS if so, or (better)
+# condense the skill into a rules-only form rather than truncating.
+_MAX_SKILL_CHARS = int(os.getenv("AGENTIC_MAX_SKILL_CHARS", "8000"))
 
 
 def load_skill_guidelines(skill_path: Path) -> str:

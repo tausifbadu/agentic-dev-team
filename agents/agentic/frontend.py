@@ -100,8 +100,8 @@ class FrontendAgent(AgentBase):
         "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_npm_install", "run_npm_build", "check_ui",
         "run_lint", "git_diff",
-        "ask_pm", "query_agent", "request_review", "send_message",
-        "read_storypack", "read_past_patterns", "read_logs", "read_api_contract",
+        "ask_pm", "query_agent", "send_message",
+        "read_past_patterns", "read_api_contract",
         "finish_story",
     ]
     iteration_cap = 60
@@ -119,9 +119,11 @@ class FrontendAgent(AgentBase):
         scratch = create_scratch_copy(self.frontend_dir, "frontend_attempt")
         registry = self._build_registry(story, scratch)
 
+        # Siblings are context only (this agent implements ONE story); id/title/
+        # ownership suffices. Full acceptance criteria dropped — they re-rode every
+        # ReAct turn at full (uncached) cost.
         sibling_summaries = [
-            {"id": s.id, "title": s.title, "ownership": s.ownership,
-             "acceptance_criteria": s.acceptance_criteria}
+            {"id": s.id, "title": s.title, "ownership": s.ownership}
             for s in self.ctx.all_stories if s.id != story.id
         ]
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -89,8 +90,10 @@ class BackendAgent(AgentBase):
     allowed_tools = [
         "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_python", "http_check", "git_diff",
-        "ask_pm", "query_agent", "request_review", "send_message", "publish_contract",
-        "read_storypack", "read_past_patterns", "read_logs", "read_api_contract",
+        "ask_pm", "query_agent", "send_message", "publish_contract",
+        "read_past_patterns", "read_api_contract",
+        # Tier B on-demand context (used when AGENTIC_LEAN_CONTEXT=1):
+        "read_guidelines", "workspace_overview", "read_storypack",
         "finish_story",
     ]
     iteration_cap = 60
@@ -107,20 +110,50 @@ class BackendAgent(AgentBase):
         registry = self._build_registry(story, scratch)
         registry.context.metadata["backend_dir"] = str(scratch)
 
-        sibling_summaries = [
-            {"id": s.id, "title": s.title, "ownership": s.ownership,
-             "acceptance_criteria": s.acceptance_criteria}
-            for s in self.ctx.all_stories if s.id != story.id
-        ]
+        lean = os.getenv("AGENTIC_LEAN_CONTEXT", "0").strip().lower() not in ("0", "false", "no", "off")
 
-        file_tree = workspace_file_tree(self.backend_dir, {".py"})
-        export_map = workspace_export_map(self.backend_dir, {".py"})
+        if lean:
+            # Tier B: keep the re-sent prompt head tiny. The full FastAPI skill, file
+            # tree, export map and sibling stories are pulled ON DEMAND via tools
+            # (read_guidelines / workspace_overview / read_storypack) — each enters the
+            # transcript once and is later compacted away, instead of riding every
+            # ReAct turn against a gateway with no prompt caching. The critical hard
+            # constraints already live inline in _SYSTEM_BASE, so removing the appended
+            # skill does not strip the must-follow rules.
+            registry.context.metadata["guidelines"] = (
+                f"FastAPI Engineering Guidelines:\n{FASTAPI_GUIDELINES}" if FASTAPI_GUIDELINES else ""
+            )
+            system_prompt = _SYSTEM_BASE + (
+                "\n\nReference context is available via tools — call each ONCE near the start:\n"
+                "  • read_guidelines() — detailed FastAPI engineering rules\n"
+                "  • workspace_overview() — file tree + export map (preserve those symbols)\n"
+                "  • read_storypack() — sibling stories for naming / dependencies / contracts"
+            )
+            user_prompt = f"""Story to implement:
+{json.dumps(story.model_dump(), indent=2)}
 
-        system_prompt = _SYSTEM_BASE
-        if FASTAPI_GUIDELINES:
-            system_prompt += f"\n\nFastAPI Engineering Guidelines:\n{FASTAPI_GUIDELINES}"
+Original requirement (truncated):
+{self.ctx.requirement_text[:2000]}
 
-        user_prompt = f"""Story to implement:
+Pull what you need with read_guidelines(), workspace_overview() and read_storypack().
+Implement the story. When validated, call `publish_contract` and then `finish_story`."""
+        else:
+            # Siblings are context only (this agent implements ONE story), so id/title/
+            # ownership is enough for naming + dependency awareness. Full acceptance
+            # criteria are dropped — they re-rode every ReAct turn at full (uncached) cost.
+            sibling_summaries = [
+                {"id": s.id, "title": s.title, "ownership": s.ownership}
+                for s in self.ctx.all_stories if s.id != story.id
+            ]
+
+            file_tree = workspace_file_tree(self.backend_dir, {".py"})
+            export_map = workspace_export_map(self.backend_dir, {".py"})
+
+            system_prompt = _SYSTEM_BASE
+            if FASTAPI_GUIDELINES:
+                system_prompt += f"\n\nFastAPI Engineering Guidelines:\n{FASTAPI_GUIDELINES}"
+
+            user_prompt = f"""Story to implement:
 {json.dumps(story.model_dump(), indent=2)}
 
 Original requirement (truncated):
