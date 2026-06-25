@@ -342,6 +342,38 @@ def update_storypack_status(pack_id: str, status: str) -> None:
     conn.close()
 
 
+def update_story_status(pack_id: str, story_id: str, status: str) -> None:
+    """Update one story's `status` inside a storypack's stories_json.
+
+    The Story Board buckets stories by this field, so persisting transitions
+    (in_progress / done) here is what makes the board reflect live progress
+    instead of leaving everything in "Pending Review".
+    """
+    conn = _get_conn()
+    row = conn.execute("SELECT stories_json FROM storypacks WHERE id = ?", (pack_id,)).fetchone()
+    if not row:
+        conn.close()
+        return
+    try:
+        stories = json.loads(row["stories_json"])
+    except (TypeError, ValueError):
+        conn.close()
+        return
+    changed = False
+    for s in stories:
+        if s.get("id") == story_id:
+            s["status"] = status
+            changed = True
+            break
+    if changed:
+        conn.execute(
+            "UPDATE storypacks SET stories_json = ? WHERE id = ?",
+            (json.dumps(stories), pack_id),
+        )
+        conn.commit()
+    conn.close()
+
+
 # --- Agent Logs ---
 
 def add_agent_log(story_id: str | None, agent_type: str, message: str,

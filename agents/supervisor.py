@@ -60,7 +60,10 @@ class SupervisorConfig:
     max_total_tool_calls: int = field(
         default_factory=lambda: int(os.getenv("AGENTIC_MAX_TOOL_CALLS", "600"))
     )
-    run_tests: bool = True
+    run_tests: bool = field(
+        default_factory=lambda: os.getenv("AGENTIC_RUN_TESTS", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+    )
     run_smoke: bool = field(
         default_factory=lambda: os.getenv("AGENTIC_RUN_SMOKE", "1").strip().lower()
         not in ("0", "false", "no", "off")
@@ -263,6 +266,14 @@ class Supervisor:
 
     # ---------- Core story execution: agent self-heals; PM only handles rescope ----------
 
+    def _set_story_status(self, story_id: str, status: str) -> None:
+        """Persist a per-story status transition so the Story Board reflects live
+        progress (in_progress / done). Best-effort — never breaks the run."""
+        try:
+            state_store.update_story_status(self.storypack_id, story_id, status)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _run_story(
         self, agent: AgentBase, story: Story, *, allow_simplify: bool = True
     ) -> StoryOutcome:
@@ -287,6 +298,7 @@ class Supervisor:
             return None  # type: ignore[return-value]
 
         self._log(agent.agent_id, "info", f"Starting story: {story.title}")
+        self._set_story_status(story.id, "in_progress")
         self.bus.publish(
             topic="story.assigned",
             from_agent="supervisor",
@@ -326,6 +338,7 @@ class Supervisor:
         if result.success:
             outcome.status = "passed"
             outcome.summary = result.summary
+            self._set_story_status(story.id, "done")
             self.bus.publish(
                 topic="story.completed",
                 from_agent=agent.agent_id,
@@ -337,6 +350,9 @@ class Supervisor:
             return outcome
 
         # ---- Agent-reported failure → publish + ask PM for rescope only ----
+        # Reset to pending_review (not a stuck "in_progress") so the board shows it
+        # as runnable again and it stays selectable for a resume run.
+        self._set_story_status(story.id, "pending_review")
         self.bus.publish(
             topic="story.failed",
             from_agent=agent.agent_id,
