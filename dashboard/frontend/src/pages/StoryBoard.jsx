@@ -37,9 +37,20 @@ export default function StoryBoard() {
 
   useEffect(refresh, [packId]);
 
+  // While a run is in flight, poll so story cards move across the columns live.
+  useEffect(() => {
+    if (pack?.status !== "in_progress" && pack?.status !== "approved") return;
+    const id = setInterval(() => {
+      api.getStorypack(packId).then(setPack).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [pack?.status, packId]);
+
   useEffect(() => {
     if (pack?.stories?.length) {
-      setSelectedIds(new Set(pack.stories.map((s) => s.id)));
+      // Pre-select everything not already completed: on the first run that's all
+      // stories; on a resume it's just the pending/failed remainder.
+      setSelectedIds(new Set(pack.stories.filter((s) => s.status !== "done").map((s) => s.id)));
     }
   }, [pack?.id]);
 
@@ -54,7 +65,9 @@ export default function StoryBoard() {
 
   const selectAllStories = () => {
     if (!pack?.stories) return;
-    setSelectedIds(new Set(pack.stories.map((s) => s.id)));
+    // Already-completed stories are skipped by the runtime, so "select all" means
+    // all the still-runnable ones.
+    setSelectedIds(new Set(pack.stories.filter((s) => s.status !== "done").map((s) => s.id)));
   };
 
   const clearStorySelection = () => {
@@ -98,14 +111,16 @@ export default function StoryBoard() {
     }
   };
 
-  const handleResume = async () => {
+  const handleResume = async (storyIds = null) => {
     setActionLoading(true);
     setError(null);
     try {
-      // No story_ids => run every story that hasn't completed yet (and retry failed).
-      const res = await api.resumeStorypack(packId, {});
+      // storyIds set => run only those (completed ones still skipped server-side).
+      // null/empty => run every story that hasn't completed yet (and retry failed).
+      const body = storyIds && storyIds.length ? { story_ids: storyIds } : {};
+      const res = await api.resumeStorypack(packId, body);
       if (res?.status === "noop") {
-        setError("All stories already completed — nothing to resume.");
+        setError("All selected stories are already completed — nothing to resume.");
       } else {
         refresh();
         navigate("/agents");
@@ -120,6 +135,11 @@ export default function StoryBoard() {
   if (loading) return <p className="text-sm text-fg-faint">Loading...</p>;
   if (!pack && error) return <p className="text-sm text-status-danger-fg">{String(error)}</p>;
   if (!pack) return <p className="text-sm text-fg-faint">StoryPack not found.</p>;
+
+  const isResumable = pack.status === "completed" || pack.status === "failed";
+  // Stories can be picked before the first run (pending_review) AND on every resume
+  // run after — only the not-yet-completed ones are selectable.
+  const canSelect = pack.status === "pending_review" || isResumable;
 
   const storiesByStatus = {};
   STATUS_COLUMNS.forEach((col) => (storiesByStatus[col.key] = []));
@@ -174,16 +194,27 @@ export default function StoryBoard() {
                 </Button>
               </>
             )}
-            {(pack.status === "completed" || pack.status === "failed") && (
-              <Button
-                size="lg"
-                onClick={handleResume}
-                loading={actionLoading}
-                disabled={actionLoading}
-                title="Run the stories that haven't completed yet (and retry failed). Already-done stories are skipped."
-              >
-                {actionLoading ? "Processing..." : "Run remaining stories"}
-              </Button>
+            {isResumable && (
+              <>
+                <Button
+                  size="lg"
+                  onClick={() => handleResume(Array.from(selectedIds))}
+                  loading={actionLoading}
+                  disabled={actionLoading || selectedIds.size === 0}
+                  title="Run only the stories you've selected (already-completed ones are skipped; prerequisites are added automatically)."
+                >
+                  {actionLoading ? "Processing..." : `Run selected (${selectedIds.size})`}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  onClick={() => handleResume(null)}
+                  disabled={actionLoading}
+                  title="Run every story that hasn't completed yet (and retry failed)."
+                >
+                  Run all remaining
+                </Button>
+              </>
             )}
           </>
         }
@@ -196,13 +227,14 @@ export default function StoryBoard() {
         </p>
       </Card>
 
-      {pack.status === "pending_review" && (
+      {canSelect && (
         <div className="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
           <span>
-            Run{" "}
+            Selected{" "}
             <span className="text-fg font-medium">{selectedIds.size}</span>
             {" / "}
-            {pack.stories.length} stories (prerequisite stories are added automatically).
+            {pack.stories.filter((s) => s.status !== "done").length} runnable stories
+            {isResumable ? " (completed stories are skipped)." : " (prerequisite stories are added automatically)."}
           </span>
           <Button variant="ghost" size="sm" onClick={selectAllStories} className="text-accent hover:text-accent">
             Select all
@@ -230,7 +262,7 @@ export default function StoryBoard() {
                 <StoryCard
                   key={story.id}
                   story={story}
-                  selectable={pack.status === "pending_review"}
+                  selectable={canSelect && story.status !== "done"}
                   selected={selectedIds.has(story.id)}
                   onToggleSelect={() => toggleStory(story.id)}
                 />
