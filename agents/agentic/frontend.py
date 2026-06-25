@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -102,6 +103,8 @@ class FrontendAgent(AgentBase):
         "run_lint", "git_diff",
         "ask_pm", "query_agent", "send_message",
         "read_past_patterns", "read_api_contract",
+        # Tier B on-demand context (used when AGENTIC_LEAN_CONTEXT=1):
+        "read_guidelines", "workspace_overview", "read_storypack",
         "finish_story",
     ]
     iteration_cap = 60
@@ -119,34 +122,67 @@ class FrontendAgent(AgentBase):
         scratch = create_scratch_copy(self.frontend_dir, "frontend_attempt")
         registry = self._build_registry(story, scratch)
 
-        # Siblings are context only (this agent implements ONE story); id/title/
-        # ownership suffices. Full acceptance criteria dropped — they re-rode every
-        # ReAct turn at full (uncached) cost.
-        sibling_summaries = [
-            {"id": s.id, "title": s.title, "ownership": s.ownership}
-            for s in self.ctx.all_stories if s.id != story.id
-        ]
-
+        lean = os.getenv("AGENTIC_LEAN_CONTEXT", "0").strip().lower() not in ("0", "false", "no", "off")
         fe_suffixes = {".js", ".jsx", ".ts", ".tsx", ".css"}
-        file_tree = workspace_file_tree(self.frontend_dir, fe_suffixes)
-        export_map = workspace_export_map(self.frontend_dir, fe_suffixes)
 
-        contract_section = ""
-        contract_path = self.ctx.workspace_dir / "contracts" / "api_contract.json"
-        if contract_path.exists():
-            contract = load_json(contract_path, {})
-            contract_section = (
-                "\n\nLatest backend API contract (use these exact paths/methods):\n"
-                + json.dumps(contract, indent=2)[:4000]
+        if lean:
+            # Tier B: keep the re-sent head tiny. The (large) UI + React skills, file
+            # tree, export map, sibling stories and API contract are pulled ON DEMAND
+            # via tools (read_guidelines / workspace_overview / read_api_contract /
+            # read_storypack), each fetched once and compacted away, instead of riding
+            # every ReAct turn against a gateway with no prompt caching. The hard UI
+            # constraints stay inline in _SYSTEM_BASE, so must-follow rules aren't lost.
+            guidelines = ""
+            if UI_GUIDELINES:
+                guidelines += f"UI/UX Design Guidelines:\n{UI_GUIDELINES}\n\n"
+            if REACT_GUIDELINES:
+                guidelines += f"React.js Engineering Guidelines:\n{REACT_GUIDELINES}"
+            registry.context.metadata["guidelines"] = guidelines
+            registry.context.metadata["overview_dir"] = str(scratch)
+            registry.context.metadata["overview_suffixes"] = list(fe_suffixes)
+            system_prompt = _SYSTEM_BASE + (
+                "\n\nReference context is available via tools — call each ONCE near the start:\n"
+                "  • read_guidelines() — detailed UI/UX + React engineering rules\n"
+                "  • workspace_overview() — file tree + export map (preserve those symbols)\n"
+                "  • read_api_contract() — backend API paths / methods / shapes\n"
+                "  • read_storypack() — sibling stories for naming / dependencies"
             )
+            user_prompt = f"""Story to implement:
+{json.dumps(story.model_dump(), indent=2)}
 
-        system_prompt = _SYSTEM_BASE
-        if UI_GUIDELINES:
-            system_prompt += f"\n\nUI/UX Design Guidelines:\n{UI_GUIDELINES}"
-        if REACT_GUIDELINES:
-            system_prompt += f"\n\nReact.js Engineering Guidelines:\n{REACT_GUIDELINES}"
+Original requirement (truncated):
+{self.ctx.requirement_text[:2000]}
 
-        user_prompt = f"""Story to implement:
+Pull what you need with read_guidelines(), workspace_overview(), read_api_contract() and read_storypack().
+Implement the story. When `run_npm_build` succeeds, call `finish_story`."""
+        else:
+            # Siblings are context only (this agent implements ONE story); id/title/
+            # ownership suffices. Full acceptance criteria dropped — they re-rode every
+            # ReAct turn at full (uncached) cost.
+            sibling_summaries = [
+                {"id": s.id, "title": s.title, "ownership": s.ownership}
+                for s in self.ctx.all_stories if s.id != story.id
+            ]
+
+            file_tree = workspace_file_tree(self.frontend_dir, fe_suffixes)
+            export_map = workspace_export_map(self.frontend_dir, fe_suffixes)
+
+            contract_section = ""
+            contract_path = self.ctx.workspace_dir / "contracts" / "api_contract.json"
+            if contract_path.exists():
+                contract = load_json(contract_path, {})
+                contract_section = (
+                    "\n\nLatest backend API contract (use these exact paths/methods):\n"
+                    + json.dumps(contract, indent=2)[:4000]
+                )
+
+            system_prompt = _SYSTEM_BASE
+            if UI_GUIDELINES:
+                system_prompt += f"\n\nUI/UX Design Guidelines:\n{UI_GUIDELINES}"
+            if REACT_GUIDELINES:
+                system_prompt += f"\n\nReact.js Engineering Guidelines:\n{REACT_GUIDELINES}"
+
+            user_prompt = f"""Story to implement:
 {json.dumps(story.model_dump(), indent=2)}
 
 Original requirement (truncated):

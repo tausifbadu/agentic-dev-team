@@ -44,7 +44,11 @@ def _workspace_overview_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolR
     from pathlib import Path
     from agents.reasoning import workspace_file_tree, workspace_export_map
 
-    target = ctx.metadata.get("backend_dir") or ctx.metadata.get("workspace_dir")
+    target = (
+        ctx.metadata.get("overview_dir")
+        or ctx.metadata.get("backend_dir")
+        or ctx.metadata.get("workspace_dir")
+    )
     if not target:
         return ToolResult(ok=False, content="No workspace directory available")
     suffixes = set(ctx.metadata.get("overview_suffixes") or [".py"])
