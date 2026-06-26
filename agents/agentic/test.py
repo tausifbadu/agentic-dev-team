@@ -170,6 +170,7 @@ or finish_story(success=false) with the blocking error if you cannot."""
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             registry=registry,
+            model=self._story_model(story),
         )
 
         if outcome.success:

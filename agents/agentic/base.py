@@ -194,9 +194,11 @@ class AgentBase:
         iteration = step.get("iteration", 0)
         if tool_calls:
             names = ", ".join(tc.get("name", "?") for tc in tool_calls)
-            preview = ", ".join(
-                f"{tc.get('name')}({_short_args(tc.get('arguments'))})" for tc in tool_calls
+            preview = "\n".join(
+                f"{tc.get('name')}({_format_args(tc.get('arguments'))})" for tc in tool_calls
             )
+            if len(preview) > _ARG_PREVIEW_MAX:
+                preview = preview[:_ARG_PREVIEW_MAX] + "…"
             self._emit("info", f"[iter {iteration}] tool calls: {names}", preview)
         elif text:
             self._emit("info", f"[iter {iteration}] thinking: {text[:160]}")
@@ -207,10 +209,14 @@ class AgentBase:
         system_prompt: str,
         user_prompt: str,
         registry: ToolRegistry,
+        model: Optional[str] = None,
     ) -> ReactLoopOutcome:
+        chosen = model or self.model
+        if chosen != self.model:
+            self._emit("info", f"Using per-story model override: {chosen}")
         return run_react_loop(
             client=self.client,
-            model=self.model,
+            model=chosen,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             registry=registry,
@@ -219,20 +225,51 @@ class AgentBase:
             on_step=self._on_react_step,
         )
 
+    def _story_model(self, story) -> Optional[str]:
+        """Per-story model override (Story.model), if any."""
+        return getattr(story, "model", None) if story is not None else None
+
 
 # ---------------------------------------------------------------------------
 
-def _short_args(args: Any) -> str:
+# Live-log tool-call argument formatting. We show the actual VALUES passed (not
+# just keys), but each value is truncated so a large arg (e.g. write_file content
+# ~8KB) is previewed, not dumped, into agent_logs / the live console.
+_ARG_VALUE_MAX = int(os.getenv("AGENTIC_LOG_ARG_VALUE_MAX", "300"))
+_ARG_PREVIEW_MAX = int(os.getenv("AGENTIC_LOG_ARG_PREVIEW_MAX", "2400"))
+
+
+def _format_args(args: Any) -> str:
+    """Render tool-call arguments as `key=value, …` with each value truncated.
+
+    Shows what was actually passed (the values), capped per-value so huge args
+    (file contents, patches) are previewed rather than flooding the log.
+    """
     if args is None:
         return ""
     if isinstance(args, str):
         try:
             data = json.loads(args)
         except Exception:  # noqa: BLE001
-            return args[:80]
+            return args[:_ARG_VALUE_MAX]
     elif isinstance(args, dict):
         data = args
     else:
-        return str(args)[:80]
-    keys = list(data.keys()) if isinstance(data, dict) else []
-    return ",".join(keys)[:80]
+        return str(args)[:_ARG_VALUE_MAX]
+    if not isinstance(data, dict):
+        return str(data)[:_ARG_VALUE_MAX]
+
+    parts: list[str] = []
+    for k, v in data.items():
+        if isinstance(v, str):
+            sval = v
+        else:
+            try:
+                sval = json.dumps(v, ensure_ascii=False)
+            except Exception:  # noqa: BLE001
+                sval = str(v)
+        sval = sval.replace("\n", "\\n")
+        if len(sval) > _ARG_VALUE_MAX:
+            sval = sval[:_ARG_VALUE_MAX] + f"…(+{len(sval) - _ARG_VALUE_MAX} chars)"
+        parts.append(f"{k}={sval}")
+    return ", ".join(parts)

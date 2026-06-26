@@ -203,6 +203,7 @@ Implement the story. When `run_npm_build` succeeds, call `finish_story`."""
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             registry=registry,
+            model=self._story_model(story),
         )
 
         if outcome.success:

@@ -174,6 +174,7 @@ Implement the story. When validated, call `publish_contract` and then `finish_st
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             registry=registry,
+            model=self._story_model(story),
         )
 
         if outcome.success:

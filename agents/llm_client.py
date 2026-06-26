@@ -125,6 +125,13 @@ def reset_usage() -> None:
 # leaves the agent unable to diagnose failures, so it loops and burns iterations.
 _TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENTIC_TOOL_RESULT_MAX_CHARS", "24000"))
 
+# How many times the ReAct loop will nudge a model that ended its turn with a
+# plain-text message (no tool call) and no validated finish_story. Weaker/cheaper
+# models sometimes NARRATE completion ("Implemented X...") instead of emitting the
+# required finish_story call; without this they fail spuriously. Bounded so a model
+# that keeps narrating still ends gracefully.
+_MAX_NO_FINISH_NUDGES = int(os.getenv("AGENTIC_MAX_NO_FINISH_NUDGES", "2"))
+
 
 def _clip_tool_result(text: str, limit: int = _TOOL_RESULT_MAX_CHARS) -> str:
     if not text or len(text) <= limit:
@@ -756,6 +763,7 @@ def call_llm_with_tools(
     nudge_final = max(1, max_iterations - 3)
     nudge_70_emitted = False
     nudge_final_emitted = False
+    no_finish_nudges = 0
 
     while iterations < max_iterations and not finished:
         iterations += 1
@@ -870,7 +878,24 @@ def call_llm_with_tools(
                     finished = True
                     break
         else:
+            # Plain-text turn, no tool call. Weaker models sometimes NARRATE
+            # completion ("Implemented X...") instead of calling finish_story, which
+            # would otherwise end the loop as a failure. Nudge it (bounded) to emit
+            # the proper tool call before accepting the plain message as the end.
             messages.append({"role": "assistant", "content": text})
+            if no_finish_nudges < _MAX_NO_FINISH_NUDGES:
+                no_finish_nudges += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "You ended your turn with a plain text message and called NO tool. "
+                        "Prose does not complete the story. If the work is done and your "
+                        "validator passes, call finish_story(success=true). If you are blocked, "
+                        "call finish_story(success=false) with a clear summary. Otherwise keep "
+                        "working with the appropriate tool calls — do not reply in prose."
+                    ),
+                })
+                continue
             final_text = text
             finished = True
             break

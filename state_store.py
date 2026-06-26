@@ -342,6 +342,34 @@ def update_storypack_status(pack_id: str, status: str) -> None:
     conn.close()
 
 
+def update_story_model(pack_id: str, story_id: str, model: str | None) -> None:
+    """Set (or clear, when model is None) a story's per-story model override inside
+    the storypack's stories_json."""
+    conn = _get_conn()
+    row = conn.execute("SELECT stories_json FROM storypacks WHERE id = ?", (pack_id,)).fetchone()
+    if not row:
+        conn.close()
+        return
+    try:
+        stories = json.loads(row["stories_json"])
+    except (TypeError, ValueError):
+        conn.close()
+        return
+    changed = False
+    for s in stories:
+        if s.get("id") == story_id:
+            s["model"] = model
+            changed = True
+            break
+    if changed:
+        conn.execute(
+            "UPDATE storypacks SET stories_json = ? WHERE id = ?",
+            (json.dumps(stories), pack_id),
+        )
+        conn.commit()
+    conn.close()
+
+
 def update_story_status(pack_id: str, story_id: str, status: str) -> None:
     """Update one story's `status` inside a storypack's stories_json.
 

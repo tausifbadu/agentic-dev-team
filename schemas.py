@@ -1,7 +1,7 @@
 """Data schemas for the Agentic Dev Team."""
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,9 @@ class Story(BaseModel):
     ownership: Literal["frontend", "backend", "testing"]
     dependencies: list[str] = Field(default_factory=list)
     status: Literal["pending_review", "approved", "rejected", "in_progress", "done"] = "pending_review"
+    # Optional per-story model override (e.g. "codex/gpt-5.4-mini"). When None, the
+    # agent uses its configured default (the *_AGENT_MODEL env var).
+    model: Optional[str] = None
 
 
 class StoryPack(BaseModel):
