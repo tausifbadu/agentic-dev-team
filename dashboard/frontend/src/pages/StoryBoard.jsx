@@ -7,6 +7,8 @@ import {
   Button,
   Badge,
   EmptyState,
+  Toggle,
+  Select,
 } from "../components/ui";
 
 const STATUS_COLUMNS = [
@@ -30,6 +32,13 @@ export default function StoryBoard() {
   const [error, setError] = useState(null);
 
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  // When on, run EXACTLY the selected stories without auto-adding prerequisites.
+  const [noDeps, setNoDeps] = useState(false);
+  // When on, re-run selected stories even if they already completed (overwrites).
+  const [force, setForce] = useState(false);
+  // Per-story model overrides {story_id: model}; "" / absent = agent default.
+  const [models, setModels] = useState([]);
+  const [storyModels, setStoryModels] = useState({});
 
   const refresh = () => {
     api.getStorypack(packId).then(setPack).catch(setError).finally(() => setLoading(false));
@@ -47,12 +56,26 @@ export default function StoryBoard() {
   }, [pack?.status, packId]);
 
   useEffect(() => {
+    api.listModels().then((r) => setModels(r.models || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (pack?.stories?.length) {
       // Pre-select everything not already completed: on the first run that's all
       // stories; on a resume it's just the pending/failed remainder.
       setSelectedIds(new Set(pack.stories.filter((s) => s.status !== "done").map((s) => s.id)));
+      // Seed model overrides from any previously-persisted per-story choices.
+      const m = {};
+      pack.stories.forEach((s) => { if (s.model) m[s.id] = s.model; });
+      setStoryModels(m);
     }
   }, [pack?.id]);
+
+  const setStoryModel = (id, model) =>
+    setStoryModels((prev) => ({ ...prev, [id]: model }));
+
+  const collectStoryModels = () =>
+    Object.fromEntries(Object.entries(storyModels).filter(([, v]) => v));
 
   const toggleStory = (id) => {
     setSelectedIds((prev) => {
@@ -89,6 +112,9 @@ export default function StoryBoard() {
       const opts = {};
       if (fastTrack) opts.fast_track = true;
       if (!fullSelection) opts.story_ids = Array.from(selectedIds);
+      if (noDeps) opts.include_dependencies = false;
+      const sm = collectStoryModels();
+      if (Object.keys(sm).length) opts.story_models = sm;
       await api.approveStorypack(packId, opts);
       refresh();
       navigate("/agents");
@@ -118,6 +144,10 @@ export default function StoryBoard() {
       // storyIds set => run only those (completed ones still skipped server-side).
       // null/empty => run every story that hasn't completed yet (and retry failed).
       const body = storyIds && storyIds.length ? { story_ids: storyIds } : {};
+      if (noDeps && body.story_ids) body.include_dependencies = false;
+      if (force) body.force = true;
+      const sm = collectStoryModels();
+      if (Object.keys(sm).length) body.story_models = sm;
       const res = await api.resumeStorypack(packId, body);
       if (res?.status === "noop") {
         setError("All selected stories are already completed — nothing to resume.");
@@ -158,15 +188,27 @@ export default function StoryBoard() {
       <PageHeader
         title="Story Board"
         subtitle={
-          <>
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-mono text-fg-muted">{packId}</span>
-            <span className="mx-2 text-fg-faint">/</span>
+            <span className="text-fg-faint">/</span>
             <span className={
               pack.status === "approved" ? "text-status-success-fg" :
               pack.status === "rejected" ? "text-status-danger-fg" :
               "text-status-warning-fg"
             }>{pack.status.replace("_", " ")}</span>
-          </>
+            <Badge
+              className="ml-1 bg-accent-muted text-accent-hover ring-1 ring-inset ring-accent/30 font-mono"
+              title="Filesystem workspace this storypack builds into"
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                strokeWidth="1.5" className="mr-1 -ml-0.5">
+                <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7z" />
+              </svg>
+              {(pack.project_id && pack.project_id !== "default")
+                ? `workspace/projects/${pack.project_id}`
+                : "workspace/ (default)"}
+            </Badge>
+          </span>
         }
         actions={
           <>
@@ -242,7 +284,32 @@ export default function StoryBoard() {
           <Button variant="ghost" size="sm" onClick={clearStorySelection}>
             Clear
           </Button>
+          {isResumable && (
+            <Toggle
+              checked={force}
+              onChange={(e) => setForce(e.target.checked)}
+              label="Re-run even if completed"
+              className="ml-auto"
+            />
+          )}
+          <Toggle
+            checked={noDeps}
+            onChange={(e) => setNoDeps(e.target.checked)}
+            label="Run without dependencies"
+            className={isResumable ? "" : "ml-auto"}
+          />
         </div>
+      )}
+      {force && (
+        <p className="text-xs text-status-warning-fg -mt-4">
+          Completed stories you select will be re-run and their previous result overwritten.
+        </p>
+      )}
+      {noDeps && (
+        <p className="text-xs text-status-warning-fg -mt-4">
+          Prerequisites will NOT be added — only the stories you tick run. Use for a quick
+          partial build (e.g. the UI shell). Selected stories may fail if code they import isn't present.
+        </p>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -262,9 +329,12 @@ export default function StoryBoard() {
                 <StoryCard
                   key={story.id}
                   story={story}
-                  selectable={canSelect && story.status !== "done"}
+                  selectable={canSelect && (force || story.status !== "done")}
                   selected={selectedIds.has(story.id)}
                   onToggleSelect={() => toggleStory(story.id)}
+                  models={models}
+                  model={storyModels[story.id] || ""}
+                  onModelChange={(m) => setStoryModel(story.id, m)}
                 />
               ))}
               {storiesByStatus[col.key].length === 0 && (
@@ -278,7 +348,7 @@ export default function StoryBoard() {
   );
 }
 
-function StoryCard({ story, selectable, selected, onToggleSelect }) {
+function StoryCard({ story, selectable, selected, onToggleSelect, models = [], model = "", onModelChange }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <div
@@ -311,6 +381,24 @@ function StoryCard({ story, selectable, selected, onToggleSelect }) {
             </Badge>
           </div>
           <p className="text-xs text-fg-faint mt-1.5 leading-relaxed">{story.description}</p>
+          {selectable && models.length > 0 && (
+            <div className="mt-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+              <span className="text-[10px] uppercase tracking-wider text-fg-faint shrink-0">Model</span>
+              <Select
+                value={model}
+                onChange={(e) => onModelChange?.(e.target.value)}
+                className="text-xs py-1"
+              >
+                <option value="">Default</option>
+                {models.map((m) => (
+                  <option key={m} value={m}>{m.split("/").pop()}</option>
+                ))}
+              </Select>
+            </div>
+          )}
+          {model && !selectable && (
+            <p className="text-[10px] text-fg-faint mt-1.5">model: {model.split("/").pop()}</p>
+          )}
           {expanded && (
             <div className="mt-3 pt-3 border-t border-border-subtle space-y-2.5 text-xs">
               <div>

@@ -50,6 +50,9 @@ export const api = {
 
   getStories: (packId) => request(`/storypacks/${packId}/stories`),
 
+  // Models selectable per story (from AGENTIC_AVAILABLE_MODELS).
+  listModels: () => request("/models"),
+
   approveStorypack: (id, options = {}) =>
     request(`/storypacks/${id}/approve`, {
       method: "POST",
