@@ -674,6 +674,8 @@ def run_agents_background(
     fast_track: bool | None = None,
     story_ids: list[str] | None = None,
     resume: bool = False,
+    include_dependencies: bool = True,
+    force: bool = False,
 ) -> None:
     """Run all agents for an approved storypack.
 
@@ -686,13 +688,21 @@ def run_agents_background(
     prerequisites per ``Story.dependencies``) are executed. Agents still receive
     the full pack as context via ``Supervisor(all_stories=...)``.
 
+    include_dependencies: when False, run EXACTLY the selected story_ids without
+    auto-adding their transitive prerequisites (e.g. to build just the UI shell
+    without the backend chain). Un-run dependencies are treated as satisfied by the
+    supervisor, so the selected stories still execute.
+
     resume: when True, stories already completed in a prior run are skipped, so a
     follow-up run only does the pending (and any failed) stories.
     """
     ft = fast_track if fast_track is not None else _env_truthy("AGENTIC_FAST_TRACK")
     if USE_AGENTIC_SUPERVISOR:
-        return _run_agents_via_supervisor(pack_id, fast_track=ft, story_ids=story_ids, resume=resume)
-    return _run_agents_legacy(pack_id, story_ids=story_ids)
+        return _run_agents_via_supervisor(
+            pack_id, fast_track=ft, story_ids=story_ids, resume=resume,
+            include_dependencies=include_dependencies, force=force,
+        )
+    return _run_agents_legacy(pack_id, story_ids=story_ids, include_dependencies=include_dependencies)
 
 
 def _run_agents_via_supervisor(
@@ -701,6 +711,8 @@ def _run_agents_via_supervisor(
     fast_track: bool = False,
     story_ids: list[str] | None = None,
     resume: bool = False,
+    include_dependencies: bool = True,
+    force: bool = False,
 ) -> None:
     """New agentic runtime: instantiate Supervisor + agents and let them coordinate."""
     global execution_state, _current_run_id, _current_pack_id
@@ -720,16 +732,31 @@ def _run_agents_via_supervisor(
     _current_pack_id = pack_id
 
     full_stories = [Story(**s) for s in pack["stories"]]
-    try:
-        stories, auto_included = expand_story_selection(full_stories, story_ids)
-    except ValueError as exc:
-        _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
-        return
+    if include_dependencies or not story_ids:
+        try:
+            stories, auto_included = expand_story_selection(full_stories, story_ids)
+        except ValueError as exc:
+            _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
+            return
+    else:
+        # No-deps: run EXACTLY the selected stories (preserve pack order). Missing
+        # prerequisites are NOT added; the supervisor treats un-run deps as satisfied.
+        idset = set(story_ids)
+        stories = [s for s in full_stories if s.id in idset]
+        missing = idset - {s.id for s in stories}
+        if missing:
+            _log(None, "orchestrator",
+                 f"Invalid story selection: unknown ids {sorted(missing)}", level="error")
+            return
+        auto_included = []
+        _log(None, "orchestrator",
+             f"No-deps run: {len(stories)} story(ies) exactly, prerequisites NOT auto-included; "
+             "acceptance-criteria verification disabled (partial build).")
 
     # Resume: drop stories already completed in a prior run (including
     # auto-included dependencies that are already done — their artifacts are in
     # the workspace and the supervisor treats a not-rerun dependency as satisfied).
-    if resume:
+    if resume and not force:
         done = completed_story_ids(pack_id)
         skipped = [s.id for s in stories if s.id in done]
         stories = [s for s in stories if s.id not in done]
@@ -740,6 +767,9 @@ def _run_agents_via_supervisor(
             _log(None, "orchestrator",
                  "Resume: nothing to run — all selected stories are already completed.")
             return
+    elif resume and force:
+        _log(None, "orchestrator",
+             f"Force re-run: running {len(stories)} selected story(ies) including any already completed.")
 
     requirement_text = pack["requirement_text"]
     workspace_dir = _workspace_for_pack(pack)
@@ -799,6 +829,12 @@ def _run_agents_via_supervisor(
                 and os.getenv("AGENTIC_RUN_TESTS", "1").strip().lower() not in ("0", "false", "no", "off"),
                 run_smoke=(not fast_track)
                 and os.getenv("AGENTIC_RUN_SMOKE", "1").strip().lower() not in ("0", "false", "no", "off"),
+                # No-deps is a partial build (prerequisites intentionally skipped), so
+                # acceptance criteria that reference those missing artifacts can't be
+                # met. Skip the AC verify gate (and its costly re-run) — the story
+                # passes on its own build/DoD instead of burning tokens on an
+                # unsatisfiable check.
+                verify_acceptance=include_dependencies,
             ),
             on_progress=_on_progress,
         )
@@ -851,7 +887,9 @@ def _run_agents_via_supervisor(
         globals()["_active_supervisor"] = None
 
 
-def _run_agents_legacy(pack_id: str, *, story_ids: list[str] | None = None) -> None:
+def _run_agents_legacy(
+    pack_id: str, *, story_ids: list[str] | None = None, include_dependencies: bool = True
+) -> None:
     """Legacy script-driven orchestration (preserved for safety / regression)."""
     global execution_state, _current_run_id, _current_pack_id
 
@@ -868,11 +906,16 @@ def _run_agents_legacy(pack_id: str, *, story_ids: list[str] | None = None) -> N
     _current_pack_id = pack_id
 
     full_stories = [Story(**s) for s in pack["stories"]]
-    try:
-        stories, auto_included = expand_story_selection(full_stories, story_ids)
-    except ValueError as exc:
-        _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
-        return
+    if include_dependencies or not story_ids:
+        try:
+            stories, auto_included = expand_story_selection(full_stories, story_ids)
+        except ValueError as exc:
+            _log(None, "orchestrator", f"Invalid story selection: {exc}", level="error")
+            return
+    else:
+        idset = set(story_ids)
+        stories = [s for s in full_stories if s.id in idset]
+        auto_included = []
     requirement_text = pack["requirement_text"]
     workspace_root = _workspace_for_pack(pack)
 
