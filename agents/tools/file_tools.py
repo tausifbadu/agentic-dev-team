@@ -7,6 +7,7 @@ inside the resolved root so the agent cannot escape its working area.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -295,6 +296,124 @@ def _apply_patch_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     )
 
 
+# --- read_symbol: pull ONE function/class/component instead of a whole file ---
+
+_JS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+
+
+def _extract_python_symbol(text: str, name: str):
+    """Exact extraction via the AST: returns (start_line, end_line, source) or None."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    lines = text.split("\n")
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+            start = node.lineno
+            if node.decorator_list:
+                start = min(start, min(d.lineno for d in node.decorator_list))
+            end = getattr(node, "end_lineno", node.lineno) or node.lineno
+            return start, end, "\n".join(lines[start - 1:end])
+    return None
+
+
+def _python_symbol_names(text: str) -> list[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    return sorted({
+        n.name for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    })
+
+
+def _extract_braced_symbol(text: str, name: str):
+    """Heuristic for JS-family (and a Python fallback): find the declaration of
+    `name`, then capture the balanced-brace block. Returns (start, end, src) or None."""
+    lines = text.split("\n")
+    decl = re.compile(
+        rf"\b(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+        rf"(?:function\s+{re.escape(name)}\b"
+        rf"|class\s+{re.escape(name)}\b"
+        rf"|(?:const|let|var)\s+{re.escape(name)}\b"
+        rf"|{re.escape(name)}\s*[:=]\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>|\w))"
+    )
+    for i, line in enumerate(lines):
+        if not decl.search(line):
+            continue
+        depth = 0
+        started = False
+        for j in range(i, len(lines)):
+            for ch in lines[j]:
+                if ch == "{":
+                    depth += 1
+                    started = True
+                elif ch == "}":
+                    depth -= 1
+            if started and depth <= 0:
+                return i + 1, j + 1, "\n".join(lines[i:j + 1])
+        if not started:
+            # no brace block (e.g. arrow returning a value) — capture to the statement end
+            for j in range(i, min(i + 25, len(lines))):
+                if lines[j].rstrip().endswith(";") or (j > i and lines[j].strip() == ""):
+                    return i + 1, j + 1, "\n".join(lines[i:j + 1])
+            return i + 1, i + 1, lines[i]
+    return None
+
+
+def _js_symbol_names(text: str) -> list[str]:
+    return sorted(set(re.findall(
+        r"\b(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+(\w+)",
+        text,
+    )))
+
+
+def _read_symbol_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    rel = args.get("path", "")
+    name = args.get("name", "")
+    if not rel or not name:
+        return ToolResult(ok=False, content="read_symbol needs both 'path' and 'name'")
+    try:
+        p = _resolve_path(ctx, rel)
+    except ToolError as exc:
+        return ToolResult(ok=False, content=str(exc))
+    if not p.exists() or not p.is_file():
+        return ToolResult(ok=False, content=f"File not found: {rel}")
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return ToolResult(ok=False, content=f"Could not read {rel}: {exc}")
+
+    ext = p.suffix.lower()
+    result = None
+    names: list[str] = []
+    if ext == ".py":
+        result = _extract_python_symbol(text, name)
+        if result is None:
+            names = _python_symbol_names(text)
+    if result is None:
+        result = _extract_braced_symbol(text, name)
+    if result is None and not names:
+        names = _js_symbol_names(text) if ext in _JS_SUFFIXES else _python_symbol_names(text)
+
+    if result is None:
+        hint = f" Available symbols: {', '.join(names[:40])}." if names else ""
+        return ToolResult(
+            ok=False,
+            content=f"Symbol '{name}' not found in {rel}.{hint} Use read_file for the whole file.",
+        )
+    start, end, body = result
+    if len(body) > MAX_READ_BYTES:
+        body = body[:MAX_READ_BYTES] + "\n... (symbol truncated)"
+    return ToolResult(
+        ok=True,
+        content=f"{rel}:{start}-{end}\n{body}",
+        metadata={"path": rel, "symbol": name, "lines": f"{start}-{end}"},
+    )
+
+
 def register_file_tools(registry: ToolRegistry) -> None:
     registry.register(Tool(
         name="read_file",
@@ -314,6 +433,25 @@ def register_file_tools(registry: ToolRegistry) -> None:
             "additionalProperties": False,
         },
         handler=_read_file_handler,
+    ))
+    registry.register(Tool(
+        name="read_symbol",
+        description=(
+            "Read ONE function/class/component by name from a file — not the whole "
+            "file. Prefer this over read_file when you only need a specific symbol "
+            "(cheaper, focused). Exact for Python (AST); heuristic for JS/TS. If not "
+            "found, it lists the file's available symbol names."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to the working copy root"},
+                "name": {"type": "string", "description": "Function / class / component name to extract"},
+            },
+            "required": ["path", "name"],
+            "additionalProperties": False,
+        },
+        handler=_read_symbol_handler,
     ))
     registry.register(Tool(
         name="write_file",

@@ -78,7 +78,19 @@ Hard constraints:
   - Stay inside your scratch dir — paths are relative to backend/.
 
 Output style: keep reasoning concise; rely on tools to act. Never paste large
-code into chat — write it directly with `write_file` or `apply_patch`."""
+code into chat — write it directly with `write_file` or `apply_patch`.
+
+EFFICIENCY — batch your tool calls. Each turn is an expensive round-trip, so do
+as much as is safe per turn: request ALL the files/inspections you need in ONE
+turn (e.g. several `read_file` / `grep` / `list_dir` at once) rather than one per
+turn. Only split across turns when a step DEPENDS on the previous result (e.g.
+write_file then http_check must be separate). Fewer, fuller turns = faster and
+cheaper.
+
+READ SURGICALLY — don't pull whole files when you need a part. Orient from
+`workspace_overview` (file tree + export map), use `grep` to locate code, and use
+`read_symbol(path, name)` to pull a single function/class. Reserve a full
+`read_file` for files you are about to rewrite."""
 
 
 class BackendAgent(AgentBase):
@@ -88,7 +100,7 @@ class BackendAgent(AgentBase):
     model_env_var = "BACKEND_AGENT_MODEL"
     default_model = "codex/gpt-5.5"
     allowed_tools = [
-        "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
+        "read_file", "read_symbol", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_python", "http_check", "git_diff",
         "ask_pm", "query_agent", "send_message", "publish_contract",
         "read_past_patterns", "read_api_contract",

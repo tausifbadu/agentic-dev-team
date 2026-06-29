@@ -72,7 +72,18 @@ Hard constraints:
   - PRESERVE existing test files — only add or extend.
   - Add any new test-only packages (e.g. httpx, playwright) to
     `tests/requirements.txt`.
-  - UI tests use Playwright (Python); test user-visible behavior, no flaky timing."""
+  - UI tests use Playwright (Python); test user-visible behavior, no flaky timing.
+
+EFFICIENCY — batch your tool calls. Each turn is an expensive round-trip, so do
+as much as is safe per turn: read ALL the code-under-test files you need in ONE
+turn (several `read_file` / `grep` at once) rather than one per turn. Only split
+across turns when a step DEPENDS on the previous result (e.g. write tests then
+run_pytest). Fewer, fuller turns = faster and cheaper.
+
+READ SURGICALLY — to understand the code under test, orient from
+`workspace_overview` (export map), use `grep` to locate code, and use
+`read_symbol(path, name)` to pull a single function/class rather than reading
+whole files. Reserve full `read_file` for when you truly need the entire file."""
 
 
 class TestAgent(AgentBase):
@@ -82,7 +93,7 @@ class TestAgent(AgentBase):
     model_env_var = "TEST_AGENT_MODEL"
     default_model = "codex/gpt-5.5"
     allowed_tools = [
-        "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
+        "read_file", "read_symbol", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_pytest",
         "run_python", "http_check", "git_diff",
         "ask_pm", "query_agent", "send_message",
