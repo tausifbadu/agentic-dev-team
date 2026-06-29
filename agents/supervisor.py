@@ -87,6 +87,7 @@ class StoryOutcome:
     tool_calls: int
     summary: str
     heal_attempts: int = 0
+    model: str = ""
 
 
 @dataclass
@@ -315,6 +316,7 @@ class Supervisor:
             iterations=0,
             tool_calls=0,
             summary="",
+            model=getattr(story, "model", None) or getattr(agent, "model", "") or "",
         )
 
         if self._budget_exceeded():
@@ -703,6 +705,27 @@ class Supervisor:
             f"(prompt {d['prompt_tokens']:,} / completion {d['completion_tokens']:,}, "
             f"cache hit {d['cache_hit_pct']}%)",
         )
+        # Persist an append-only execution record (survives re-runs / overwrites).
+        o = self.outcomes.get(story.id)
+        try:
+            state_store.save_story_run(
+                run_id=self.run_id,
+                storypack_id=self.storypack_id,
+                story_id=story.id,
+                story_title=story.title,
+                agent_type=(o.ownership if o else story.ownership),
+                model=(o.model if o else (getattr(story, "model", None) or "")),
+                status=(o.status if o else "unknown"),
+                iterations=(o.iterations if o else 0),
+                tool_calls=(o.tool_calls if o else 0),
+                prompt_tokens=d.get("prompt_tokens", 0),
+                completion_tokens=d.get("completion_tokens", 0),
+                total_tokens=d.get("total_tokens", 0),
+                cached_tokens=d.get("cached_tokens", 0),
+                summary=(o.summary if o else "")[:500],
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break a run
+            pass
 
     def _log(self, agent: str, level: str, msg: str, detail: Optional[str] = None) -> None:
         try:

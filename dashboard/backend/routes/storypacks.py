@@ -98,6 +98,25 @@ def get_stories(pack_id: str):
     return pack["stories"]
 
 
+@router.get("/storypacks/{pack_id}/history")
+def storypack_history(pack_id: str):
+    """Append-only execution history (one entry per story run) for this pack —
+    survives re-runs that overwrite the workspace + story status."""
+    return {"runs": state_store.get_story_runs(storypack_id=pack_id)}
+
+
+@router.get("/story-runs")
+def story_runs(story_id: str | None = None, pack_id: str | None = None):
+    """Execution history filtered by story and/or pack."""
+    return {"runs": state_store.get_story_runs(storypack_id=pack_id, story_id=story_id)}
+
+
+@router.get("/runs/{run_id}/iterations")
+def run_iterations(run_id: str, story_id: str | None = None):
+    """Per-iteration token usage for a run (optionally a single story)."""
+    return {"iterations": state_store.get_iteration_usage(run_id, story_id)}
+
+
 @router.post("/storypacks/{pack_id}/approve")
 def approve_storypack(pack_id: str, body: ApproveBody = ApproveBody()):
     if execution_state.get("running"):

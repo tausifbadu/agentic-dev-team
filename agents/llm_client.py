@@ -822,6 +822,14 @@ def call_llm_with_tools(
         text = (msg.content or "").strip()
         tool_calls = getattr(msg, "tool_calls", None) or []
 
+        # This call's token usage (gateway-reported) for per-iteration telemetry.
+        _u = getattr(response, "usage", None)
+        call_usage = None
+        if _u is not None:
+            pt = int(getattr(_u, "prompt_tokens", 0) or getattr(_u, "input_tokens", 0) or 0)
+            ct = int(getattr(_u, "completion_tokens", 0) or getattr(_u, "output_tokens", 0) or 0)
+            call_usage = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
         if on_step:
             try:
                 on_step({
@@ -831,6 +839,7 @@ def call_llm_with_tools(
                         for tc in tool_calls
                     ],
                     "iteration": iterations,
+                    "usage": call_usage,
                 })
             except Exception:
                 pass

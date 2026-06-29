@@ -165,6 +165,47 @@ CREATE TABLE IF NOT EXISTS workspace_chat_edits (
     summary TEXT,
     created_at TEXT NOT NULL
 );
+
+-- One row per (run, story) execution — an append-only history that survives
+-- re-runs (which overwrite the workspace files + story status). The generated
+-- code for each execution lives in tool_calls (write_file args), keyed by the
+-- same run_id + story_id.
+CREATE TABLE IF NOT EXISTS story_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    storypack_id TEXT NOT NULL,
+    story_id TEXT NOT NULL,
+    story_title TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    iterations INTEGER NOT NULL DEFAULT 0,
+    tool_calls INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_story_runs_story ON story_runs(story_id);
+CREATE INDEX IF NOT EXISTS idx_story_runs_pack ON story_runs(storypack_id);
+
+-- Per-iteration token usage (one row per ReAct round-trip) for live + historical
+-- visibility into where tokens go within a story.
+CREATE TABLE IF NOT EXISTS iteration_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    storypack_id TEXT NOT NULL DEFAULT '',
+    story_id TEXT,
+    agent_type TEXT NOT NULL DEFAULT '',
+    iteration INTEGER NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_iter_usage_run ON iteration_usage(run_id, story_id);
 """
 
 
@@ -368,6 +409,77 @@ def update_story_model(pack_id: str, story_id: str, model: str | None) -> None:
         )
         conn.commit()
     conn.close()
+
+
+def save_story_run(
+    *, run_id: str, storypack_id: str, story_id: str, story_title: str = "",
+    agent_type: str = "", model: str = "", status: str = "", iterations: int = 0,
+    tool_calls: int = 0, prompt_tokens: int = 0, completion_tokens: int = 0,
+    total_tokens: int = 0, cached_tokens: int = 0, summary: str = "",
+) -> None:
+    """Append one execution record (never overwritten) for a (run, story)."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO story_runs (run_id, storypack_id, story_id, story_title, "
+        "agent_type, model, status, iterations, tool_calls, prompt_tokens, "
+        "completion_tokens, total_tokens, cached_tokens, summary, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, storypack_id, story_id, story_title, agent_type, model, status,
+         iterations, tool_calls, prompt_tokens, completion_tokens, total_tokens,
+         cached_tokens, summary, _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_story_runs(storypack_id: str | None = None, story_id: str | None = None,
+                   limit: int = 200) -> list[dict]:
+    conn = _get_conn()
+    where, params = [], []
+    if storypack_id:
+        where.append("storypack_id = ?"); params.append(storypack_id)
+    if story_id:
+        where.append("story_id = ?"); params.append(story_id)
+    sql = "SELECT * FROM story_runs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"; params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_iteration_usage(
+    *, run_id: str, storypack_id: str = "", story_id: str | None = None,
+    agent_type: str = "", iteration: int = 0, prompt_tokens: int = 0,
+    completion_tokens: int = 0, total_tokens: int = 0,
+) -> None:
+    """Append one ReAct iteration's token usage (live + historical breakdown)."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO iteration_usage (run_id, storypack_id, story_id, agent_type, "
+        "iteration, prompt_tokens, completion_tokens, total_tokens, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (run_id, storypack_id, story_id, agent_type, iteration, prompt_tokens,
+         completion_tokens, total_tokens, _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_iteration_usage(run_id: str, story_id: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    if story_id:
+        rows = conn.execute(
+            "SELECT * FROM iteration_usage WHERE run_id = ? AND story_id = ? ORDER BY iteration",
+            (run_id, story_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM iteration_usage WHERE run_id = ? ORDER BY iteration", (run_id,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def update_story_status(pack_id: str, story_id: str, status: str) -> None:

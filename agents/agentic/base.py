@@ -192,6 +192,29 @@ class AgentBase:
         text = (step.get("text") or "").strip()
         tool_calls = step.get("tool_calls") or []
         iteration = step.get("iteration", 0)
+        usage = step.get("usage") or {}
+
+        # Per-iteration token usage: persist (history) + surface live in the log.
+        tok_note = ""
+        if usage:
+            pt = usage.get("prompt_tokens", 0)
+            ct = usage.get("completion_tokens", 0)
+            tok_note = f" · {pt + ct:,} tok (p {pt:,}/c {ct:,})"
+            try:
+                import state_store
+                state_store.save_iteration_usage(
+                    run_id=self.ctx.run_id,
+                    storypack_id=self.ctx.storypack_id,
+                    story_id=(self._current_story.id if self._current_story else None),
+                    agent_type=self.agent_id,
+                    iteration=iteration,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    total_tokens=pt + ct,
+                )
+            except Exception:  # noqa: BLE001 — telemetry must never break the loop
+                pass
+
         if tool_calls:
             names = ", ".join(tc.get("name", "?") for tc in tool_calls)
             preview = "\n".join(
@@ -199,9 +222,9 @@ class AgentBase:
             )
             if len(preview) > _ARG_PREVIEW_MAX:
                 preview = preview[:_ARG_PREVIEW_MAX] + "…"
-            self._emit("info", f"[iter {iteration}] tool calls: {names}", preview)
+            self._emit("info", f"[iter {iteration}] tool calls: {names}{tok_note}", preview)
         elif text:
-            self._emit("info", f"[iter {iteration}] thinking: {text[:160]}")
+            self._emit("info", f"[iter {iteration}] thinking: {text[:160]}{tok_note}")
 
     def _execute_react(
         self,
