@@ -1,0 +1,44 @@
+Build a Personal Task Tracker Web Application
+
+Overview:
+A simple, single-page web app where a person can capture tasks, mark them done, and
+filter their list. No accounts, no teams — just one focused personal to-do list that
+feels fast and pleasant to use. Keep the scope small and the experience polished.
+
+Backend (Python FastAPI + SQLite):
+- POST /api/tasks — create a task. Accepts: title (required, 1–200 chars) and an
+  optional priority ("low" | "medium" | "high", default "medium"). Stores the task with
+  a generated id, completed=false, and created_at timestamp. Returns the created task.
+- GET /api/tasks — return all tasks, newest first. Support an optional filter query
+  ?status=active|completed|all (default "all").
+- PATCH /api/tasks/{id} — update a task: toggle/set completed, and/or edit title or
+  priority. Returns the updated task. 404 if the task does not exist.
+- DELETE /api/tasks/{id} — delete a task. 404 if it does not exist.
+- GET /api/tasks/stats — return counts: total, active, completed.
+- Use Pydantic models for request/response validation.
+- Error handling: 400 for invalid input (empty title, title too long, bad priority),
+  404 for a missing task id.
+- Store everything in a single SQLite database file.
+- Add CORS middleware allowing all origins for local development.
+
+Frontend (React + Vite + Tailwind CSS):
+- A single, focused page: an input to add a task (title + a priority selector), and the
+  list of tasks below it.
+- Each task row shows: a checkbox/toggle for completed, the title (struck through when
+  completed), a small priority indicator, and a delete control.
+- Filter tabs or controls: All / Active / Completed, wired to the backend filter.
+- A small summary of counts (total · active · completed) from /api/tasks/stats.
+- Required states: a loading state while fetching, an empty state that invites the
+  person to add their first task, and an error state with a retry action.
+- Optimistic, snappy interactions (toggling/deleting should feel instant).
+- Design quality matters: derive a clean, distinctive visual identity suited to a calm,
+  focused productivity tool — a deliberate palette, type, and spacing. It should not look
+  like a generic bootstrap CRUD form. Use inline SVG icons, never emoji.
+
+Technical Constraints:
+- Backend: Python 3.9+, FastAPI, SQLite, Pydantic. Use Optional[X] from typing rather
+  than the X | None syntax.
+- Frontend: React 18+, Vite, Tailwind CSS. Fetch from the backend with relative URLs
+  (/api/tasks); the Vite dev proxy forwards /api to the backend.
+- No authentication. The app runs on localhost for development.
+- Responsive: usable on mobile (single column, comfortable touch targets) and desktop.
