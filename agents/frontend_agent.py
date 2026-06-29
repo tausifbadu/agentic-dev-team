@@ -283,10 +283,12 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Restrained professional palette: one calm accent + a neutral slate.
+        // (Agents may extend/override per the Design System skill.)
         brand: {
-          primary: '#14BCD9',
-          secondary: '#005986',
-          accent: '#50BB40',
+          primary: '#2563eb',
+          secondary: '#475569',
+          accent: '#2563eb',
         },
       },
       fontFamily: {
@@ -345,64 +347,74 @@ _BASE_STYLES_CSS = """\
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   body {
-    @apply bg-gray-950 text-gray-200 antialiased;
+    @apply bg-gray-50 text-gray-800 antialiased;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
-  ::selection { @apply bg-brand-primary/30 text-white; }
-  * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent; }
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::selection { @apply bg-brand-primary/20 text-gray-900; }
+  * { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { @apply bg-white/10 rounded-full; }
-  ::-webkit-scrollbar-thumb:hover { @apply bg-white/20; }
+  ::-webkit-scrollbar-thumb { @apply bg-gray-300 rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-gray-400; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 @layer components {
-  .glass-card {
-    @apply bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] rounded-2xl;
+  /* Solid professional cards (NOT glassmorphism). Legacy names kept for compatibility. */
+  .card, .glass-card {
+    @apply bg-white border border-gray-200 rounded-lg shadow-sm;
   }
-  .glass-card-hover {
-    @apply glass-card transition-all duration-300 hover:bg-white/[0.07] hover:border-white/[0.12] hover:shadow-xl hover:shadow-black/20;
+  .card-hover, .glass-card-hover {
+    @apply bg-white border border-gray-200 rounded-lg shadow-sm transition-shadow duration-200 hover:shadow-md hover:border-gray-300;
   }
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold
-           bg-brand-primary text-gray-950 shadow-lg shadow-brand-primary/20
-           transition-all duration-200 hover:brightness-110 hover:shadow-brand-primary/30
-           active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-semibold
+           bg-brand-primary text-white transition-colors duration-150 hover:bg-blue-700
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40 focus-visible:ring-offset-2
+           active:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold
-           bg-brand-secondary text-white shadow-lg shadow-brand-secondary/20
-           transition-all duration-200 hover:brightness-125
-           active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium
+           bg-white border border-gray-300 text-gray-700 transition-colors duration-150 hover:bg-gray-50
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40 focus-visible:ring-offset-2
+           active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium
-           text-gray-400 transition-all duration-200 hover:bg-white/5 hover:text-white;
+    @apply inline-flex min-h-9 items-center justify-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium
+           text-gray-600 transition-colors duration-150 hover:bg-gray-100 hover:text-gray-900
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40;
   }
   .input-field {
-    @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white
-           placeholder:text-gray-500 transition-all duration-200
+    @apply min-h-10 w-full bg-white border border-gray-300 rounded-md px-3 py-2 text-sm text-gray-900
+           placeholder:text-gray-400 transition-colors duration-150
            focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20
-           hover:border-white/20;
+           disabled:bg-gray-50 disabled:cursor-not-allowed;
   }
   .badge {
-    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium border;
   }
-  .badge-success { @apply bg-green-500/10 text-green-400 border border-green-500/20; }
-  .badge-error { @apply bg-red-500/10 text-red-400 border border-red-500/20; }
-  .badge-info { @apply bg-brand-primary/10 text-brand-primary border border-brand-primary/20; }
-  .badge-warning { @apply bg-amber-500/10 text-amber-400 border border-amber-500/20; }
+  .badge-success { @apply bg-green-50 text-green-700 border-green-200; }
+  .badge-error { @apply bg-red-50 text-red-700 border-red-200; }
+  .badge-info { @apply bg-blue-50 text-blue-700 border-blue-200; }
+  .badge-warning { @apply bg-amber-50 text-amber-700 border-amber-200; }
   .toast {
-    @apply fixed top-6 right-6 z-50 max-w-sm glass-card p-4 animate-slideDown shadow-2xl shadow-black/40;
+    @apply fixed top-4 right-4 z-50 max-w-sm bg-white border border-gray-200 rounded-lg p-4 shadow-lg animate-slideDown;
   }
   .skeleton {
-    @apply bg-gradient-to-r from-white/5 via-white/10 to-white/5 bg-[length:200%_100%] animate-shimmer rounded-lg;
+    @apply bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 bg-[length:200%_100%] animate-shimmer rounded;
   }
   .section-header {
-    @apply text-2xl font-bold text-white tracking-tight;
+    @apply text-lg font-semibold text-gray-900 tracking-tight;
   }
+  /* Kept for compatibility; solid accent text, NOT a gradient. */
   .gradient-text {
-    @apply bg-gradient-to-r from-brand-primary to-brand-accent bg-clip-text text-transparent;
+    @apply text-brand-primary font-semibold;
   }
 }
 """

@@ -388,13 +388,16 @@ _SKIP_SECTIONS = {
 _MAX_SKILL_CHARS = int(os.getenv("AGENTIC_MAX_SKILL_CHARS", "8000"))
 
 
-def load_skill_guidelines(skill_path: Path) -> str:
+def load_skill_guidelines(skill_path: Path, max_chars: int | None = None) -> str:
     """Load a SKILL.md file and extract actionable guideline sections.
 
     Strips YAML frontmatter and meta/instructional sections (how to use,
     prerequisites, etc.), keeping all substantive engineering and design
-    guidelines. Truncates to _MAX_SKILL_CHARS to stay within prompt budgets.
+    guidelines. Truncates to `max_chars` (default `_MAX_SKILL_CHARS`). Callers that
+    serve the skill ON DEMAND (fetched once via read_guidelines, not re-sent every
+    turn) can pass a larger cap to keep the full guidance.
     """
+    cap = max_chars if max_chars is not None else _MAX_SKILL_CHARS
     if not skill_path.exists():
         return ""
     try:
@@ -435,6 +438,6 @@ def load_skill_guidelines(skill_path: Path) -> str:
             kept.extend(content)
 
     result = "\n".join(kept).strip()
-    if len(result) > _MAX_SKILL_CHARS:
-        result = result[:_MAX_SKILL_CHARS] + "\n... (truncated)"
+    if len(result) > cap:
+        result = result[:cap] + "\n... (truncated)"
     return result

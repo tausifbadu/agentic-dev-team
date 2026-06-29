@@ -23,14 +23,28 @@ from agents.reasoning import (
 from schemas import Story
 
 
-SKILL_UI_PATH = Path(__file__).parent.parent.parent / ".cursor" / "skills" / "agentic-dev-team" / "SKILL_UI.md"
-SKILL_REACT_PATH = Path(__file__).parent.parent.parent / ".cursor" / "skills" / "agentic-dev-team" / "SKILL_REACT.md"
-UI_GUIDELINES = load_skill_guidelines(SKILL_UI_PATH)
+_SKILLS_DIR = Path(__file__).parent.parent.parent / ".cursor" / "skills" / "agentic-dev-team"
+SKILL_UI_DESIGN_PATH = _SKILLS_DIR / "SKILL_UI_DESIGN.md"   # authored design-system + quality standard (primary)
+SKILL_UI_PATH = _SKILLS_DIR / "SKILL_UI.md"                 # existing UI reference (supplementary)
+SKILL_REACT_PATH = _SKILLS_DIR / "SKILL_REACT.md"
+
+# Larger cap for the on-demand (lean) path: read_guidelines fetches these ONCE and
+# they compact away, so we can afford the full design guidance — unlike the inline
+# path which re-sends every turn and stays capped at the default.
+_LEAN_SKILL_CHARS = int(os.getenv("AGENTIC_LEAN_SKILL_CHARS", "40000"))
+
+# Inline (non-lean) path — capped (re-sent every turn).
+DESIGN_GUIDELINES = load_skill_guidelines(SKILL_UI_DESIGN_PATH)
 REACT_GUIDELINES = load_skill_guidelines(SKILL_REACT_PATH)
+# On-demand (lean) path — full, un-truncated.
+DESIGN_GUIDELINES_FULL = load_skill_guidelines(SKILL_UI_DESIGN_PATH, max_chars=_LEAN_SKILL_CHARS)
+UI_GUIDELINES_FULL = load_skill_guidelines(SKILL_UI_PATH, max_chars=_LEAN_SKILL_CHARS)
+REACT_GUIDELINES_FULL = load_skill_guidelines(SKILL_REACT_PATH, max_chars=_LEAN_SKILL_CHARS)
 
 
 _SYSTEM_BASE = """You are the Frontend Agent — a Senior React + Vite + Tailwind CSS engineer
-who ships visually polished, premium dark-theme UIs.
+who ships clean, professional, information-dense business UIs (think admin console /
+internal tool), following the Design System skill — NOT trendy consumer landing pages.
 
 Your assignment: implement ONE frontend story end-to-end inside an isolated scratch
 copy of the frontend workspace. You have full autonomy and ~60 iterations.
@@ -46,8 +60,8 @@ Workflow you choose:
   5. After a green build, call `check_ui` to confirm the UI ACTUALLY RENDERS.
      A green build does NOT prove your UI works — only that it compiled. Pass
      `expect_text` and `expect_selectors` drawn straight from THIS story's
-     acceptance criteria (e.g. expect_text=["Detect My Location"],
-     expect_selectors=[".glass-card", "button"]). check_ui also reports console/
+     acceptance criteria (e.g. expect_text=["Add task"],
+     expect_selectors=["table", "button"]). check_ui also reports console/
      page errors — a blank page with errors means your UI is broken even though
      the build passed. Fix and re-run until check_ui passes.
   6. Only when build is green AND check_ui confirms the required elements render,
@@ -84,11 +98,29 @@ Hard constraints:
     `src/App.jsx`, `tailwind.config.js`, `postcss.config.js`. Only modify them if
     necessary. Do NOT remove `<div id="root"></div>` or the ReactDOM.createRoot call.
   - PRESERVE all existing exports when modifying a file.
-  - Brand colours are available as `brand-primary`, `brand-secondary`, `brand-accent`.
-  - All UI must look professional (dark theme, glassmorphism, gradients, smooth
-    transitions, loading/empty/error states, inline SVG icons — never emoji).
+  - Define your color tokens per the Design System skill (extend the scaffold's
+    tailwind config / CSS variables); don't assume a fixed brand palette exists.
+  - VISUAL REGISTER (unless the requirement explicitly asks for a consumer/branded/dark
+    look): professional, business-grade, per the Design System skill — LIGHT theme by
+    default, a neutral palette + ONE restrained accent, SOLID (non-glass) surfaces,
+    information-dense and legibility-first, with loading/empty/error states and inline
+    SVG icons (never emoji). Do NOT use glassmorphism, backdrop-blur, glow shadows,
+    gradient text, or decorative background orbs/gradients — those read as trendy, not
+    professional.
 
-Stay inside your scratch dir; paths are relative to frontend/."""
+Stay inside your scratch dir; paths are relative to frontend/.
+
+EFFICIENCY — batch your tool calls. Each turn is an expensive round-trip, so do
+as much as is safe per turn: request ALL the files/inspections you need in ONE
+turn (e.g. several `read_file` / `grep` / `list_dir` at once) rather than one per
+turn. Only split across turns when a step DEPENDS on the previous result (e.g.
+write_file then run_npm_build must be separate). Fewer, fuller turns = faster and
+cheaper.
+
+READ SURGICALLY — don't pull whole files when you need a part. Orient from
+`workspace_overview` (file tree + export map), use `grep` to locate code, and use
+`read_symbol(path, name)` to pull a single component/function. Reserve a full
+`read_file` for files you are about to rewrite."""
 
 
 class FrontendAgent(AgentBase):
@@ -98,7 +130,7 @@ class FrontendAgent(AgentBase):
     model_env_var = "FRONTEND_AGENT_MODEL"
     default_model = "codex/gpt-5.5"
     allowed_tools = [
-        "read_file", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
+        "read_file", "read_symbol", "write_file", "list_dir", "grep", "apply_patch", "delete_file",
         "run_npm_install", "run_npm_build", "check_ui",
         "run_lint", "git_diff",
         "ask_pm", "query_agent", "send_message",
@@ -133,10 +165,15 @@ class FrontendAgent(AgentBase):
             # every ReAct turn against a gateway with no prompt caching. The hard UI
             # constraints stay inline in _SYSTEM_BASE, so must-follow rules aren't lost.
             guidelines = ""
-            if UI_GUIDELINES:
-                guidelines += f"UI/UX Design Guidelines:\n{UI_GUIDELINES}\n\n"
-            if REACT_GUIDELINES:
-                guidelines += f"React.js Engineering Guidelines:\n{REACT_GUIDELINES}"
+            if DESIGN_GUIDELINES_FULL:
+                guidelines += (
+                    "DESIGN SYSTEM & QUALITY STANDARD — this is your primary design "
+                    f"authority, FOLLOW IT:\n{DESIGN_GUIDELINES_FULL}\n\n"
+                )
+            if UI_GUIDELINES_FULL:
+                guidelines += f"Additional UI/UX reference:\n{UI_GUIDELINES_FULL}\n\n"
+            if REACT_GUIDELINES_FULL:
+                guidelines += f"React.js Engineering Guidelines:\n{REACT_GUIDELINES_FULL}"
             registry.context.metadata["guidelines"] = guidelines
             registry.context.metadata["overview_dir"] = str(scratch)
             registry.context.metadata["overview_suffixes"] = list(fe_suffixes)
@@ -177,8 +214,8 @@ Implement the story. When `run_npm_build` succeeds, call `finish_story`."""
                 )
 
             system_prompt = _SYSTEM_BASE
-            if UI_GUIDELINES:
-                system_prompt += f"\n\nUI/UX Design Guidelines:\n{UI_GUIDELINES}"
+            if DESIGN_GUIDELINES:
+                system_prompt += f"\n\nDesign System & Quality Standard (FOLLOW THIS):\n{DESIGN_GUIDELINES}"
             if REACT_GUIDELINES:
                 system_prompt += f"\n\nReact.js Engineering Guidelines:\n{REACT_GUIDELINES}"
 
