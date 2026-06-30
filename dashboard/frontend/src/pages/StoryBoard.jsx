@@ -166,7 +166,10 @@ export default function StoryBoard() {
   if (!pack && error) return <p className="text-sm text-status-danger-fg">{String(error)}</p>;
   if (!pack) return <p className="text-sm text-fg-faint">StoryPack not found.</p>;
 
-  const isResumable = pack.status === "completed" || pack.status === "failed";
+  // completed/failed runs, plus an interrupted run left stuck in_progress (e.g. the
+  // backend was restarted mid-run), can all be resumed.
+  const isResumable =
+    pack.status === "completed" || pack.status === "failed" || pack.status === "in_progress";
   // Stories can be picked before the first run (pending_review) AND on every resume
   // run after — only the not-yet-completed ones are selectable.
   const canSelect = pack.status === "pending_review" || isResumable;
