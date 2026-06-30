@@ -158,11 +158,21 @@ def _retry_after_seconds(exc: Exception) -> Optional[float]:
     return None
 
 
+# Cap on how long we'll actually wait for a gateway-supplied Retry-After. When a
+# quota is exhausted the gateway can return Retry-After values of hours (e.g. 12518s);
+# sleeping that long makes the agent look hung and pins the pipeline. Cap it so a
+# rate-limited call retries a few times over a couple minutes and then fails with a
+# clear error instead of silently sleeping for hours.
+_LLM_RETRY_AFTER_MAX = float(os.getenv("AGENTIC_LLM_RETRY_AFTER_MAX", "120"))
+
+
 def _backoff_delay(attempt: int, exc: Exception) -> float:
-    """Retry-After if given, else exponential backoff capped at _LLM_BACKOFF_MAX."""
-    return _retry_after_seconds(exc) or min(
-        _LLM_BACKOFF_BASE * (2 ** (attempt - 1)), _LLM_BACKOFF_MAX
-    )
+    """Retry-After (capped at _LLM_RETRY_AFTER_MAX) if given, else exponential backoff
+    capped at _LLM_BACKOFF_MAX."""
+    ra = _retry_after_seconds(exc)
+    if ra is not None:
+        return min(ra, _LLM_RETRY_AFTER_MAX)
+    return min(_LLM_BACKOFF_BASE * (2 ** (attempt - 1)), _LLM_BACKOFF_MAX)
 
 
 def _model_api(model_name: str) -> str:
@@ -710,6 +720,7 @@ def call_llm_with_tools(
     temperature: float = 0.2,
     max_tokens: int = 8192,
     on_step: Optional[Callable[[dict[str, Any]], None]] = None,
+    on_tool_result: Optional[Callable[[dict[str, Any]], None]] = None,
     is_finished: Optional[Callable[[str, dict[str, Any]], bool]] = None,
     compact_at_chars: Optional[int] = None,
     keep_last_rounds: int = 6,
@@ -866,7 +877,22 @@ def call_llm_with_tools(
             for tc in tool_calls:
                 tool_name = tc.function.name
                 arg_text = tc.function.arguments or "{}"
+                _t0 = time.monotonic()
                 invocation = invoke_tool(tool_name, arg_text)
+                _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+                _result_text = invocation.content_for_model or ""
+                # Surface the OUTCOME live (intent was already shown via on_step).
+                if on_tool_result:
+                    try:
+                        on_tool_result({
+                            "iteration": iterations,
+                            "name": tool_name,
+                            "ok": not _result_text.lstrip().startswith("ERROR"),
+                            "result": _result_text,
+                            "elapsed_ms": _elapsed_ms,
+                        })
+                    except Exception:
+                        pass
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

@@ -226,6 +226,28 @@ class AgentBase:
         elif text:
             self._emit("info", f"[iter {iteration}] thinking: {text[:160]}{tok_note}")
 
+    def _on_tool_result(self, step: dict[str, Any]) -> None:
+        """Stream each tool's OUTCOME (fired right after the tool runs), so the live
+        log shows what's actually happening — not just the intended call."""
+        name = step.get("name", "?")
+        ok = step.get("ok", True)
+        it = step.get("iteration", 0)
+        ms = step.get("elapsed_ms", 0) or 0
+        result = (step.get("result") or "").strip()
+        icon = "✓" if ok else "✗"
+        if ms >= 1000:
+            dur = f" {ms / 1000:.1f}s"
+        elif ms > 0:
+            dur = f" {ms}ms"
+        else:
+            dur = ""
+        first_line = (result.split("\n", 1)[0][:140] if result else ("ok" if ok else "error"))
+        self._emit(
+            "info" if ok else "warn",
+            f"[iter {it}] → {name} {icon}{dur}: {first_line}",
+            result[:_RESULT_DETAIL_MAX] if result else None,
+        )
+
     def _execute_react(
         self,
         *,
@@ -246,6 +268,7 @@ class AgentBase:
             max_iterations=self.iteration_cap,
             temperature=0.2,
             on_step=self._on_react_step,
+            on_tool_result=self._on_tool_result,
         )
 
     def _story_model(self, story) -> Optional[str]:
@@ -260,6 +283,8 @@ class AgentBase:
 # ~8KB) is previewed, not dumped, into agent_logs / the live console.
 _ARG_VALUE_MAX = int(os.getenv("AGENTIC_LOG_ARG_VALUE_MAX", "300"))
 _ARG_PREVIEW_MAX = int(os.getenv("AGENTIC_LOG_ARG_PREVIEW_MAX", "2400"))
+# Max chars of a tool RESULT kept in the (expandable) live-log detail.
+_RESULT_DETAIL_MAX = int(os.getenv("AGENTIC_LOG_RESULT_MAX", "2000"))
 
 
 def _format_args(args: Any) -> str:

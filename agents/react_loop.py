@@ -80,6 +80,7 @@ def run_react_loop(
     temperature: float = 0.2,
     max_tokens: int = 6000,
     on_step: Optional[Callable[[dict[str, Any]], None]] = None,
+    on_tool_result: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> ReactLoopOutcome:
     """Run a complete ReAct loop for one agent task.
 
@@ -126,6 +127,7 @@ def run_react_loop(
         temperature=temperature,
         max_tokens=max_tokens,
         on_step=on_step,
+        on_tool_result=on_tool_result,
         compact_at_chars=compact_at_chars,
         keep_last_rounds=keep_last_rounds,
     )
