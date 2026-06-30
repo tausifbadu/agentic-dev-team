@@ -1,0 +1,40 @@
+Extend the Back-Office Admin Panel: add Create Customer & Create Order
+
+Context (IMPORTANT — this builds ON TOP of the existing app):
+This requirement extends the Back-Office Admin Panel already present in this workspace —
+the app with a left sidebar (Dashboard, Customers, Orders) backed by FastAPI + SQLite. Do
+NOT rebuild it from scratch. Reuse the existing layout, sidebar, design tokens/components,
+API client, and database. Read the current code first, then EXTEND it; preserve all
+existing functionality and styling.
+
+Goal:
+Let the user create new customers and new orders directly from the UI.
+
+Backend (extend the existing FastAPI app — add only what's missing):
+- POST /api/customers — create a customer. Fields: name (required), email (required, valid
+  email), company (optional), phone (optional). Returns the created record. 400 on invalid
+  input.
+- POST /api/orders — create an order. Fields: customer_id (required, must reference an
+  existing customer), amount (required, number >= 0), items (short text), status (default
+  "pending"; one of pending|paid|shipped|cancelled). Returns the created order. 400 on
+  invalid input or unknown customer_id.
+- Reuse the existing SQLite database, Pydantic models, and CORS setup. Use Optional[X]
+  from typing, not X | None. Do not break existing endpoints.
+
+Frontend (extend the existing Customers and Orders tabs — reuse existing components):
+- Customers tab: add a "New Customer" action (button) that opens a form (modal or side
+  panel) with fields name, email, company, phone. Client-side validation with inline field
+  errors; submit button shows a loading/disabled state; backend errors shown inline. On
+  success, close the form and refresh the customers table so the new row appears.
+- Orders tab: add a "New Order" action that opens a form with a customer dropdown (loaded
+  from /api/customers), an amount input, an items field, and a status selector. Same
+  validation / loading / error handling. On success, refresh the orders table.
+- Match the existing professional/enterprise look exactly — reuse the current sidebar,
+  design tokens, tables, and status-badge styles. Inline SVG icons only, never emoji.
+
+Constraints:
+- BUILD ON the existing codebase in this workspace — extend, do not replace. Preserve
+  existing exports, routes, and styling. Import from existing files where possible.
+- Backend: Python 3.9+, FastAPI, SQLite, Pydantic. Use Optional[X], not X | None.
+- Frontend: React 18+, Vite, Tailwind CSS. Fetch via relative /api URLs. No auth.
+  Localhost. Responsive on mobile and desktop.

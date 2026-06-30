@@ -1,0 +1,78 @@
+Build a Back-Office Admin Panel (Customers & Orders)
+
+Overview:
+A small internal back-office web app for a business to manage its customers and their
+orders. A persistent LEFT SIDEBAR with three vertical navigation tabs switches the main
+content area between three sections: (1) Dashboard, (2) Customers, (3) Orders. It is a
+single-page app with client-side view switching. No authentication.
+
+Backend (Python FastAPI + SQLite):
+
+Customers:
+- GET /api/customers — paginated list. Optional ?search= (name/email/company),
+  ?page=1&limit=20.
+- POST /api/customers — create. Fields: name (required), email (required, valid email),
+  company (optional), phone (optional). Returns the created customer.
+- PATCH /api/customers/{id} — update any of the above fields.
+- DELETE /api/customers/{id} — delete the customer.
+
+Orders:
+- GET /api/orders — list, newest first. Optional ?status=pending|paid|shipped|cancelled|all
+  and ?customer_id=. Each order includes the customer's name (joined).
+- POST /api/orders — create. Fields: customer_id (required, must exist), amount (required,
+  >= 0), items (short text description), status (default "pending"). Returns the order.
+- PATCH /api/orders/{id} — update status and/or amount.
+- DELETE /api/orders/{id} — delete the order.
+
+Dashboard:
+- GET /api/dashboard/stats — returns total_customers, total_orders, total_revenue (sum of
+  amounts for orders in status paid or shipped), orders_by_status (counts per status), and
+  recent_orders (the 5 most recent, with customer name, amount, status, created_at).
+
+Backend rules:
+- Pydantic models for request/response validation.
+- Errors: 400 for invalid input (missing required fields, bad email, negative amount,
+  unknown status), 404 for a missing customer/order, 400 if an order references a
+  customer_id that does not exist.
+- Single SQLite database file. CORS middleware allowing all origins for local dev.
+- Use Optional[X] from typing rather than the X | None syntax.
+
+Frontend (React + Vite + Tailwind CSS):
+
+Layout — left sidebar shell:
+- A persistent vertical LEFT SIDEBAR: app name/logo at the top, then THREE navigation
+  tabs — Dashboard, Customers, Orders — each with an inline SVG icon and a text label.
+  The active tab is clearly highlighted (background + accent). Selecting a tab switches
+  the main content area to the right; no full page reloads.
+- Responsive: on mobile the sidebar collapses to a top bar or an icon-only rail.
+
+Dashboard view:
+- A row of KPI stat cards: total customers, total orders, total revenue, pending orders.
+- A "Recent orders" table: customer, amount, status (as a colored status badge), date.
+- Loading, empty, and error states.
+
+Customers view:
+- A searchable, paginated data table: name, email, company, phone, created date, plus
+  per-row actions (edit, delete).
+- "Add customer" opens a form (modal or side panel) with validation and inline field
+  errors. Editing reuses the same form.
+- Confirm before deleting. Loading / empty / error states.
+
+Orders view:
+- A data table of orders: customer name, amount, status badge, items, date.
+- Filter by status (a row of filter tabs or a select), wired to the backend.
+- "Create order": pick an existing customer, enter amount + items. Update an order's
+  status inline (e.g. a per-row status control). Delete an order.
+- Loading / empty / error states.
+
+Design direction:
+- A professional, business-admin aesthetic. The project's design-system skill defines the
+  visual standard — follow it (clean, light, information-dense, data-table-forward, a
+  restrained palette with one accent, solid surfaces). Inline SVG icons only, never emoji.
+  Consistent spacing, a clear active-nav state, and proper status-badge colors.
+
+Technical Constraints:
+- Backend: Python 3.9+, FastAPI, SQLite, Pydantic. Use Optional[X], not X | None.
+- Frontend: React 18+, Vite, Tailwind CSS. Fetch via relative /api URLs (the Vite dev
+  proxy forwards /api to the backend).
+- No authentication. Runs on localhost for development. Responsive on mobile and desktop.
