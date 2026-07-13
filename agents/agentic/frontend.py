@@ -53,10 +53,19 @@ You self-heal. You do NOT phone the PM for code-level bugs.
 
 Workflow you choose:
   1. Read the existing source (`list_dir`, `read_file`, `grep`).
-  2. If you depend on backend data, call `read_api_contract` first.
+  2. If you depend on backend data, call `read_api_contract` first — it lists the
+     ACCEPTED ENUM VOCABULARY (statuses, categories, priorities, sort keys). Your
+     dropdown option values, filter values, sort values, and board column keys MUST
+     be exactly these strings (the backend 400s on anything else, e.g. sending
+     'general' when it accepts 'General'). Never invent enum wording from the story
+     text — the contract is the source of truth.
   3. Edit files via `write_file` or `apply_patch`.
   4. Validate with `run_npm_build` (auto-runs npm install + vite build).
      Use `run_lint` for fast feedback before the heavier build.
+     If your story touches any form, filter, sort control, or status/board that
+     sends enum values to the API, run `check_contract` — it statically flags any
+     value that doesn't match the backend's accepted vocabulary (the #1 cause of
+     400s). Fix every value it flags before finishing.
   5. After a green build, call `check_ui` to confirm the UI ACTUALLY RENDERS.
      A green build does NOT prove your UI works — only that it compiled. Pass
      `expect_text` and `expect_selectors` drawn straight from THIS story's
@@ -64,6 +73,13 @@ Workflow you choose:
      expect_selectors=["table", "button"]). check_ui also reports console/
      page errors — a blank page with errors means your UI is broken even though
      the build passed. Fix and re-run until check_ui passes.
+     • If what you must verify is BEHIND AN INTERACTION (e.g. dropdown options
+       inside a modal that only opens on click), pass `interactions` so check_ui
+       reveals it first, e.g. interactions=[{"click": "text=New Ticket"}] then
+       expect_text=["Feature Request"]. A static load can't see modal content.
+     • If the elements depend on LIVE BACKEND DATA (tables, the board, populated
+       lists), pass `boot_backend=true` so check_ui boots the backend and proxies
+       /api — otherwise those screens render empty/error states and can't be verified.
   6. Only when build is green AND check_ui confirms the required elements render,
      call `finish_story(success=true)`.
 
@@ -98,6 +114,16 @@ Hard constraints:
     `src/App.jsx`, `tailwind.config.js`, `postcss.config.js`. Only modify them if
     necessary. Do NOT remove `<div id="root"></div>` or the ReactDOM.createRoot call.
   - PRESERVE all existing exports when modifying a file.
+  - COMPONENT OWNERSHIP (critical — multiple stories share this workspace):
+    `src/App.jsx` is a SHARED shell owned by no single story. Put YOUR screen's
+    implementation in its OWN new file (e.g. `src/screens/<Name>.jsx`), and touch
+    App.jsx only to import your component and wire it to its route. When you edit
+    App.jsx you MUST read it first and make the SMALLEST additive change — never
+    rewrite it from scratch, never delete or replace other screens' routes, imports,
+    components, or navigation, and never collapse features back into a placeholder.
+    If a route currently shows a placeholder for YOUR story, replace only that one
+    route's content with your component and leave every other route intact. Assume
+    other screens already exist (or will) in App.jsx and must survive your edit.
   - Define your color tokens per the Design System skill (extend the scaffold's
     tailwind config / CSS variables); don't assume a fixed brand palette exists.
   - VISUAL REGISTER (unless the requirement explicitly asks for a consumer/branded/dark
@@ -134,7 +160,7 @@ class FrontendAgent(AgentBase):
         "run_npm_install", "run_npm_build", "check_ui",
         "run_lint", "git_diff",
         "ask_pm", "query_agent", "send_message",
-        "read_past_patterns", "read_api_contract",
+        "read_past_patterns", "read_api_contract", "check_contract",
         # Tier B on-demand context (used when AGENTIC_LEAN_CONTEXT=1):
         "read_guidelines", "workspace_overview", "read_storypack",
         "finish_story",
@@ -243,19 +269,29 @@ Implement the story. When `run_npm_build` succeeds, call `finish_story`."""
             model=self._story_model(story),
         )
 
+        ckpt = None
         if outcome.success:
-            promote_scratch_copy(scratch, self.frontend_dir)
+            manifest = promote_scratch_copy(
+                scratch, self.frontend_dir, label=(story.id if story else ""),
+            )
+            self._log_promotion(manifest)
             self._record_scope(story, outcome.summary)
             self._emit("info", "Frontend story complete; scratch promoted.", outcome.summary)
         else:
             self._emit("error", f"Frontend story failed: {outcome.summary}", outcome.error)
+            ckpt = self._preserve_checkpoint(
+                scratch=scratch, target_dir=self.frontend_dir, registry=registry, story=story,
+            )
 
+        meta = dict(outcome.metadata or {})
+        if ckpt:
+            meta["recoverable_checkpoint"] = ckpt
         return RunResult(
             success=outcome.success,
             summary=outcome.summary or outcome.final_text,
             iterations=outcome.iterations,
             tool_calls=registry.context.tool_call_count,
-            metadata=outcome.metadata,
+            metadata=meta,
         )
 
     # ---------- Helpers ----------

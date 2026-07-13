@@ -210,6 +210,50 @@ def _publish_contract_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
 
 _BACKEND_REQUIRED_VALIDATORS = {"http_check"}
 _FRONTEND_REQUIRED_VALIDATORS = {"run_npm_build"}
+_TESTING_REQUIRED_BASE = {"run_pytest"}
+
+
+def _env_off(name: str, default: str = "1") -> bool:
+    return os.getenv(name, default).strip().lower() in ("0", "false", "no", "off")
+
+
+def _frontend_present(ctx: ToolContext) -> bool:
+    """Does the app under test have a frontend? (Then testing must also run E2E.)"""
+    try:
+        if ctx.scratch_dir and (Path(ctx.scratch_dir) / "frontend").exists():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        wd = ctx.metadata.get("workspace_dir") or ctx.workspace_dir
+        return bool(wd and (Path(wd) / "frontend").exists())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_testing_dod(ctx: ToolContext) -> str | None:
+    """Testing DoD gate: require a passing run_pytest (API) and — when a frontend
+    exists — a passing run_e2e (UI/flow/integration), with no edits since. Returns
+    an error message to reject the finish, or None to allow it."""
+    validations = ctx.metadata.get("validations") or {}
+    required = set(_TESTING_REQUIRED_BASE)
+    if _frontend_present(ctx) and not _env_off("TESTING_DOD_E2E"):
+        required.add("run_e2e")
+    missing = sorted(t for t in required if not (validations.get(t) or {}).get("ok"))
+    if missing:
+        return (
+            "DoD gate (testing): the suite is not proven green. You must have a passing "
+            f"{' and '.join(sorted(required))} before finish_story(success=true) — "
+            f"missing or failing: {', '.join(missing)}. Run the validator(s); if the suite "
+            "genuinely cannot pass, call finish_story(success=false) with the blocking error."
+        )
+    if bool(ctx.metadata.get("dirty_since_validation")):
+        again = "run_pytest" + (" and run_e2e" if "run_e2e" in required else "")
+        return (
+            "DoD gate (testing): you edited files since the last successful validation. "
+            f"Re-run {again}, then call finish_story again."
+        )
+    return None
 
 
 def _backend_dod_http_check_enabled() -> bool:
@@ -257,6 +301,14 @@ def _finish_story_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         elif ctx.agent_id == "frontend":
             required = _FRONTEND_REQUIRED_VALIDATORS
             required_label = "run_npm_build"
+        elif ctx.agent_id == "test":
+            # Multi-validator gate (run_pytest + run_e2e). Handled here; the generic
+            # single-validator block below is skipped for the test agent.
+            gate_error = _check_testing_dod(ctx)
+            if gate_error:
+                return ToolResult(ok=False, content=gate_error)
+            required = set()
+            required_label = ""
         else:
             required = set()
             required_label = ""

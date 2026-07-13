@@ -81,13 +81,19 @@ def _extract_summary(text: str) -> str:
 
 
 def _mark_validation(ctx: ToolContext, tool_name: str, ok: bool) -> None:
-    """Record the latest validator outcome for the DoD gate in finish_story."""
-    ctx.metadata["last_validation"] = {
+    """Record the latest validator outcome for the DoD gate in finish_story.
+
+    Also keep a per-tool map so multi-validator gates (e.g. testing needs BOTH
+    run_pytest and run_e2e green) can check each validator independently, not just
+    the single most-recent one."""
+    record = {
         "tool": tool_name,
         "ok": bool(ok),
         "at_call": ctx.tool_call_count,
         "at_time": time.time(),
     }
+    ctx.metadata["last_validation"] = record
+    ctx.metadata.setdefault("validations", {})[tool_name] = record
     if ok:
         ctx.metadata["dirty_since_validation"] = False
 
@@ -177,6 +183,16 @@ def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         py_paths.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(py_paths)
 
+    # Emit a machine-readable JUnit XML report so the test ledger (test_ledger.py)
+    # can record per-case results without parsing human pytest output. One file per
+    # run_pytest call; paths are accumulated on the context for the recorder.
+    junit_dir = cwd / ".junit"
+    try:
+        junit_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    junit_path = junit_dir / f"pytest_{len(ctx.metadata.get('junit_reports', []))}.xml"
+
     try:
         result = subprocess.run(
             [
@@ -185,6 +201,7 @@ def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 "-q",                          # quiet per-test progress
                 "--log-cli-level=WARNING",     # suppress INFO logs (e.g. SQLAlchemy)
                 "--no-header",
+                f"--junitxml={junit_path}",    # structured results for the test ledger
                 target,
             ],
             cwd=cwd,
@@ -201,6 +218,12 @@ def _run_pytest_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             ok=False,
             content=f"pytest timed out after {timeout}s\n{_trim(_filter_noise(raw))}",
         )
+
+    try:
+        if junit_path.exists():
+            ctx.metadata.setdefault("junit_reports", []).append(str(junit_path))
+    except OSError:
+        pass
 
     raw_combined = f"{result.stdout}\n{result.stderr}"
     summary = _extract_summary(raw_combined)
@@ -930,6 +953,18 @@ try:
         page.on("pageerror", lambda e: console_errors.append("pageerror: " + str(e)))
         resp = page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
         page.wait_for_timeout(600)
+        interaction_errors = []
+        for step in params.get("interactions", []):
+            try:
+                if "click" in step:
+                    page.click(step["click"], timeout=5000)
+                elif "fill" in step:
+                    page.fill(step["fill"]["selector"], str(step["fill"].get("value", "")), timeout=5000)
+                elif "wait_ms" in step:
+                    page.wait_for_timeout(int(step["wait_ms"]))
+                page.wait_for_timeout(250)
+            except Exception as exc:
+                interaction_errors.append(str(step)[:120] + " -> " + str(exc)[:200])
         body_text = page.inner_text("body")[:6000]
         text_results = [{"text": t, "found": t.lower() in body_text.lower()} for t in expect_text]
         sel_results = []
@@ -944,33 +979,106 @@ try:
         "status": resp.status if resp else None, "body_text": body_text,
         "text_results": text_results, "selector_results": sel_results,
         "console_errors": console_errors[:20],
+        "interaction_errors": interaction_errors[:10],
     }))
 except Exception as exc:
     print(json.dumps({"_error": "driver_crash", "detail": str(exc)}))
 '''
 
 
-def _serve_dir(directory: Path, port: int):
+def _serve_dir(directory: Path, port: int, api_port: int | None = None):
     """Serve a built SPA on 127.0.0.1:port in a daemon thread, falling back to
-    index.html for client-side routes. Returns the server (call .shutdown())."""
+    index.html for client-side routes. Returns the server (call .shutdown()).
+
+    When ``api_port`` is set, requests under ``/api`` are reverse-proxied to a
+    backend booted on that port, so the SPA's relative ``/api/*`` fetches resolve
+    to real data (tables, boards) during a headless UI check instead of 404ing.
+    """
     from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
     class _SPAHandler(SimpleHTTPRequestHandler):
         def log_message(self, *args):  # silence access logs
             pass
 
+        def _is_api(self):
+            return api_port is not None and self.path.split("?")[0].startswith("/api")
+
+        def _proxy(self):
+            body_len = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(body_len) if body_len else None
+            fwd_headers = {k: v for k, v in self.headers.items()
+                           if k.lower() not in ("host", "content-length", "connection")}
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{api_port}{self.path}",
+                data=body, headers=fwd_headers, method=self.command,
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                    status, headers_out = resp.status, resp.getheaders()
+            except urllib.error.HTTPError as exc:
+                data = exc.read()
+                status = exc.code
+                headers_out = list(exc.headers.items())
+            except Exception as exc:  # noqa: BLE001
+                data = json.dumps({"proxy_error": str(exc)}).encode()
+                status, headers_out = 502, [("Content-Type", "application/json")]
+            self.send_response(status)
+            for hk, hv in headers_out:
+                if hk.lower() in ("content-length", "transfer-encoding", "connection"):
+                    continue
+                self.send_header(hk, hv)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_GET(self):
+            if self._is_api():
+                return self._proxy()
             fs_path = self.translate_path(self.path)
             base = os.path.basename(self.path.split("?")[0])
             if not os.path.exists(fs_path) and "." not in base:
                 self.path = "/index.html"  # SPA fallback
             return super().do_GET()
 
+        def do_POST(self):
+            if self._is_api():
+                return self._proxy()
+            self.send_error(405)
+
+        do_PATCH = do_POST
+        do_PUT = do_POST
+        do_DELETE = do_POST
+
     handler = functools.partial(_SPAHandler, directory=str(directory))
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+def _boot_backend_for_ui(ctx: ToolContext):
+    """Boot the sibling backend (uvicorn main:app) for a data-driven UI check.
+
+    Returns (proc, port, error). The backend dir comes from ctx.metadata
+    (set by the agent base) or falls back to <workspace>/backend.
+    """
+    backend_dir = ctx.metadata.get("backend_dir")
+    bd = Path(backend_dir) if backend_dir else (
+        Path(ctx.workspace_dir) / "backend" if ctx.workspace_dir else None
+    )
+    if bd is None or not (bd / "main.py").exists():
+        return None, None, f"no backend main.py (looked in {bd})"
+    _run_pip_install(bd)
+    port = _find_free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=bd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if not _wait_for_port(port, timeout=30):
+        _terminate_and_drain(proc)
+        return None, None, "backend failed to bind within 30s"
+    return proc, port, None
 
 
 def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -987,6 +1095,8 @@ def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     expect_text = [str(t) for t in (args.get("expect_text") or [])]
     expect_selectors = [str(s) for s in (args.get("expect_selectors") or [])]
     timeout = int(args.get("timeout", 25))
+    interactions = args.get("interactions") or []
+    boot_backend = bool(args.get("boot_backend", False))
 
     cwd = _scratch(ctx)
     index = cwd / "dist" / "index.html"
@@ -996,13 +1106,22 @@ def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             content="No dist/index.html found. Run run_npm_build first, then call check_ui.",
         )
 
+    backend_proc = None
+    api_port = None
+    backend_note = ""
+    if boot_backend:
+        backend_proc, api_port, boot_err = _boot_backend_for_ui(ctx)
+        if boot_err:
+            backend_note = f"\n(boot_backend requested but failed: {boot_err} — /api calls will 404)"
+
     port = _find_free_port()
-    server = _serve_dir(cwd / "dist", port)
+    server = _serve_dir(cwd / "dist", port, api_port)
     try:
         url = f"http://127.0.0.1:{port}{path}"
         params = json.dumps({
             "url": url, "expect_text": expect_text,
             "expect_selectors": expect_selectors, "timeout": timeout,
+            "interactions": interactions,
         })
         try:
             proc = subprocess.run(
@@ -1042,6 +1161,7 @@ def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         text_results = data.get("text_results", [])
         sel_results = data.get("selector_results", [])
         console_errors = data.get("console_errors", [])
+        interaction_errors = data.get("interaction_errors", [])
         missing_text = [t["text"] for t in text_results if not t["found"]]
         missing_sel = [s["selector"] for s in sel_results if not s["found"]]
         has_expectations = bool(expect_text or expect_selectors)
@@ -1057,20 +1177,231 @@ def _check_ui_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         if console_errors:
             lines.append(f"⚠ console/page errors ({len(console_errors)}): "
                          + " | ".join(str(e)[:120] for e in console_errors[:5]))
+        if interaction_errors:
+            lines.append(f"⚠ interaction errors ({len(interaction_errors)}): "
+                         + " | ".join(str(e)[:140] for e in interaction_errors[:5]))
         lines.append("--- rendered body text (excerpt) ---")
         lines.append((data.get("body_text") or "").strip()[:2500] or "(empty body — page rendered nothing)")
 
         return ToolResult(
             ok=ok,
-            content="\n".join(lines),
+            content="\n".join(lines) + backend_note,
             metadata={"missing_text": missing_text, "missing_selectors": missing_sel,
-                      "console_errors": console_errors, "status": data.get("status")},
+                      "console_errors": console_errors, "interaction_errors": interaction_errors,
+                      "status": data.get("status")},
         )
     finally:
         try:
             server.shutdown()
         except Exception:
             pass
+        if backend_proc and backend_proc.poll() is None:
+            backend_proc.terminate()
+            try:
+                backend_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                backend_proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# run_e2e — boot the full app stack and run the UI / flow / integration suites
+# ---------------------------------------------------------------------------
+
+_PLAYWRIGHT_READY: bool | None = None
+
+
+def _playwright_ready() -> bool:
+    """One-time probe: is Playwright installed AND a chromium browser launchable?
+    Cached for the process. Lets run_e2e gracefully skip UI/flow layers on hosts
+    without a browser (consistent with check_ui's soft-skip) instead of hard-failing."""
+    global _PLAYWRIGHT_READY
+    if _PLAYWRIGHT_READY is not None:
+        return _PLAYWRIGHT_READY
+    probe = (
+        "from playwright.sync_api import sync_playwright\n"
+        "p=sync_playwright().start()\n"
+        "b=p.chromium.launch(); b.close(); p.stop()\n"
+        "print('ok')"
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", probe],
+                           capture_output=True, text=True, timeout=90)
+        _PLAYWRIGHT_READY = r.returncode == 0 and "ok" in (r.stdout or "")
+    except Exception:  # noqa: BLE001
+        _PLAYWRIGHT_READY = False
+    return _PLAYWRIGHT_READY
+
+
+def _build_frontend_dist(frontend_dir: Path) -> tuple[bool, str]:
+    """npm install + vite build inside frontend_dir when dist/index.html is missing.
+    Returns (ok, note); ok=True means a servable dist/index.html exists."""
+    index = frontend_dir / "dist" / "index.html"
+    if index.exists():
+        return True, "dist already present"
+    if not (frontend_dir / "package.json").exists():
+        return False, "no package.json in frontend"
+    cmd = _npm_command()
+    npx_exe = shutil.which("npx") or shutil.which("npx.cmd")
+    if not cmd or not npx_exe:
+        return False, "npm/npx not found on PATH"
+    _link_node_modules(frontend_dir)
+    inst = subprocess.run(
+        [*cmd, "install", "--prefer-offline", "--no-audit", "--no-fund"],
+        cwd=frontend_dir, capture_output=True, text=True, check=False, timeout=300,
+    )
+    if inst.returncode != 0:
+        return False, f"npm install failed: {_trim(inst.stdout + inst.stderr)[-600:]}"
+    _save_node_modules(frontend_dir)
+    try:
+        build = subprocess.run(
+            [npx_exe, "vite", "build"], cwd=frontend_dir,
+            capture_output=True, text=True, check=False, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "vite build timed out"
+    if build.returncode != 0 or not index.exists():
+        return False, f"vite build failed: {_trim(build.stdout + build.stderr)[-600:]}"
+    return True, "built dist"
+
+
+def _run_e2e_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Boot the full app stack (backend + built frontend, /api reverse-proxied) and
+    run the UI / flow / integration pytest suites against it, with BASE_URL exported.
+
+    Emits JUnit XML for the test ledger. ok=True only if the selected suites pass
+    (exit 0). UI/flow layers are skipped (soft) when a headless browser is
+    unavailable; if that leaves nothing runnable, returns a soft skip."""
+    timeout = int(args.get("timeout", 300))
+    requested = args.get("layers") or ["ui", "flows", "integration"]
+    cwd = _scratch(ctx)
+    tests_dir = cwd / "tests"
+
+    # Install python test deps (pytest/httpx/playwright) + the code under test.
+    _run_pip_install(cwd)
+    if (cwd / "backend").is_dir():
+        _run_pip_install(cwd / "backend")
+    if tests_dir.is_dir():
+        _run_pip_install(tests_dir)
+
+    # Which requested layers actually have test files?
+    browser_ok = _playwright_ready()
+    layers, skipped = [], []
+    for layer in requested:
+        d = tests_dir / layer
+        if not (d.exists() and any(d.rglob("test_*.py"))):
+            continue
+        if layer in ("ui", "flows") and not browser_ok:
+            skipped.append(layer)
+            continue
+        layers.append(layer)
+
+    if not layers:
+        note = (f" (skipped {', '.join(skipped)}: no headless browser — "
+                "install with `python -m playwright install chromium`)" if skipped else "")
+        # Soft pass so a browser-less host isn't permanently blocked (like check_ui);
+        # still records the validator so the testing DoD gate can proceed.
+        _mark_validation(ctx, "run_e2e", True)
+        return ToolResult(
+            ok=True,
+            content=f"run_e2e: no runnable UI/flow/integration tests{note} (soft pass — not a validation).",
+            metadata={"skipped": True, "skipped_layers": skipped},
+        )
+
+    targets = [f"tests/{layer}" for layer in layers]
+
+    # Boot the backend.
+    backend_proc, api_port, boot_err = _boot_backend_for_ui(ctx)
+    server = None
+    notes = []
+    if skipped:
+        notes.append(f"UI/flow skipped (no browser): {', '.join(skipped)}")
+    try:
+        if boot_err:
+            _mark_validation(ctx, "run_e2e", False)
+            return ToolResult(ok=False, content=f"run_e2e: backend failed to boot: {boot_err}")
+
+        # Serve the built frontend (build it if needed) so UI/flow tests hit the real
+        # app with real data; BASE_URL points at it (/api proxied to the backend).
+        frontend_dir = cwd / "frontend"
+        if frontend_dir.exists() and (frontend_dir / "package.json").exists():
+            built, fnote = _build_frontend_dist(frontend_dir)
+            notes.append(f"frontend: {fnote}")
+            if built:
+                fport = _find_free_port()
+                server = _serve_dir(frontend_dir / "dist", fport, api_port)
+                base_url = f"http://127.0.0.1:{fport}"
+            else:
+                base_url = f"http://127.0.0.1:{api_port}"
+                notes.append("UI/flow tests need a built frontend; using backend URL")
+        else:
+            base_url = f"http://127.0.0.1:{api_port}"
+
+        env = os.environ.copy()
+        py_paths = [str(cwd)]
+        if (cwd / "backend").is_dir():
+            py_paths.append(str(cwd / "backend"))
+        if env.get("PYTHONPATH"):
+            py_paths.append(env["PYTHONPATH"])
+        env["PYTHONPATH"] = os.pathsep.join(py_paths)
+        env["BASE_URL"] = base_url
+
+        junit_dir = cwd / ".junit"
+        try:
+            junit_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        junit_path = junit_dir / f"e2e_{len(ctx.metadata.get('junit_reports', []))}.xml"
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header",
+                 "--log-cli-level=WARNING", f"--junitxml={junit_path}", *targets],
+                cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout, env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _mark_validation(ctx, "run_e2e", False)
+            raw = (exc.stdout or "") + (exc.stderr or "")
+            return ToolResult(ok=False, content=f"run_e2e timed out after {timeout}s\n{_trim(_filter_noise(raw))}")
+
+        try:
+            if junit_path.exists():
+                ctx.metadata.setdefault("junit_reports", []).append(str(junit_path))
+        except OSError:
+            pass
+
+        raw_combined = f"{result.stdout}\n{result.stderr}"
+        summary = _extract_summary(raw_combined)
+        body = _trim(_filter_noise(raw_combined))
+        combined = (f"--- pytest summary ---\n{summary}\n--- output ---\n" if summary else "") + body
+
+        if result.returncode == 0:
+            passed, verdict = True, "PASS"
+        elif result.returncode == 5:
+            passed, verdict = False, "FAIL (no tests collected)"
+        else:
+            passed, verdict = False, "FAIL"
+
+        _mark_validation(ctx, "run_e2e", passed)
+        note_str = ("\n(" + "; ".join(notes) + ")") if notes else ""
+        return ToolResult(
+            ok=passed,
+            content=(f"run_e2e exit={result.returncode} ({verdict}) "
+                     f"layers={','.join(layers)} base_url={base_url}{note_str}\n{combined}"),
+            metadata={"exit_code": result.returncode, "passed": passed,
+                      "base_url": base_url, "layers": layers, "skipped_layers": skipped},
+        )
+    finally:
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+        if backend_proc and backend_proc.poll() is None:
+            backend_proc.terminate()
+            try:
+                backend_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                backend_proc.kill()
 
 
 def register_exec_tools(registry: ToolRegistry) -> None:
@@ -1195,7 +1526,12 @@ def register_exec_tools(registry: ToolRegistry) -> None:
             "build success alone says nothing about the DOM. Pass expect_text (visible "
             "strings) and/or expect_selectors (CSS selectors) drawn from the story's "
             "acceptance criteria; ok=True only if all are found. Also reports console/page "
-            "errors (blank-page symptoms). Soft-passes if a headless browser isn't installed."
+            "errors (blank-page symptoms). "
+            "To verify UI behind an interaction (e.g. options inside a modal that opens on "
+            "click), pass `interactions` (e.g. [{\"click\": \"text=New Ticket\"}]) — the steps "
+            "run before assertions so the revealed content is checked. To verify data-driven "
+            "screens (tables, boards) against REAL data, pass `boot_backend=true` to boot the "
+            "sibling backend and proxy /api to it. Soft-passes if a headless browser isn't installed."
         ),
         parameters_schema={
             "type": "object",
@@ -1209,9 +1545,52 @@ def register_exec_tools(registry: ToolRegistry) -> None:
                     "type": "array", "items": {"type": "string"},
                     "description": "CSS selectors that must match at least one element",
                 },
+                "interactions": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Optional steps run after load, before assertions, to reveal UI behind "
+                        "an interaction. Each item is one of: {\"click\": \"<css or text=...>\"}, "
+                        "{\"fill\": {\"selector\": \"#id\", \"value\": \"x\"}}, or {\"wait_ms\": 500}. "
+                        "Example (open a modal): [{\"click\": \"text=New Ticket\"}]"
+                    ),
+                },
+                "boot_backend": {
+                    "type": "boolean",
+                    "description": (
+                        "Boot the sibling backend and reverse-proxy /api to it so data-driven "
+                        "screens render real data. Default false (static dist only)."
+                    ),
+                },
                 "timeout": {"type": "integer", "minimum": 5, "maximum": 120},
             },
             "additionalProperties": False,
         },
         handler=_check_ui_handler,
+    ))
+    registry.register(Tool(
+        name="run_e2e",
+        description=(
+            "Boot the full app stack (backend + built frontend, with /api reverse-proxied) "
+            "and run the UI / flow / integration pytest suites against it. Sets BASE_URL for "
+            "the tests (available via the `base_url`/`api_client` fixtures). Builds the "
+            "frontend automatically if needed. Emits results to the test ledger. ok=True only "
+            "if the selected suites pass. UI/flow layers are skipped (soft) when no headless "
+            "browser is installed; integration still runs. Use this to prove user flows and "
+            "backend integration flows end-to-end — a passing run_pytest (API) proves only the "
+            "in-process API layer."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "layers": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["ui", "flows", "integration"]},
+                    "description": "Which E2E layers to run (default: all three that have test files).",
+                },
+                "timeout": {"type": "integer", "minimum": 30, "maximum": 600},
+            },
+            "additionalProperties": False,
+        },
+        handler=_run_e2e_handler,
     ))

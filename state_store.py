@@ -206,6 +206,93 @@ CREATE TABLE IF NOT EXISTS iteration_usage (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_iter_usage_run ON iteration_usage(run_id, story_id);
+
+-- Preserved agent scratch dirs from runs that hit the iteration cap WITHOUT an
+-- explicit finish_story. When the last validation was green, the work is verified
+-- and promotable to live instead of being discarded (#4 promote-on-cap-if-verified).
+CREATE TABLE IF NOT EXISTS recoverable_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL DEFAULT '',
+    storypack_id TEXT NOT NULL DEFAULT '',
+    story_id TEXT NOT NULL DEFAULT '',
+    story_title TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    scratch_path TEXT NOT NULL,
+    target_dir TEXT NOT NULL DEFAULT '',
+    verified INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'preserved',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recoverable_pack ON recoverable_checkpoints(storypack_id);
+
+-- Test ledger (see TEST_AGENT_PLAN.md). Per-POC coverage + run history mirrored
+-- from the canonical workspace files (tests/test_manifest.json, tests/runs/*).
+CREATE TABLE IF NOT EXISTS test_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    storypack_id TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
+    trigger TEXT NOT NULL DEFAULT 'build',
+    status TEXT NOT NULL DEFAULT '',
+    totals_json TEXT NOT NULL DEFAULT '{}',
+    summary TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT '',
+    finished_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_test_run_project ON test_run(project_id);
+
+CREATE TABLE IF NOT EXISTS test_case_result (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    test_run_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    layer TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    test_file TEXT NOT NULL DEFAULT '',
+    test_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    acceptance_refs TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_test_case_run ON test_case_result(test_run_id);
+CREATE INDEX IF NOT EXISTS idx_test_case_project ON test_case_result(project_id);
+
+-- Current-state coverage snapshot per project (replaced wholesale each run).
+CREATE TABLE IF NOT EXISTS test_coverage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    layer TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    test_file TEXT NOT NULL DEFAULT '',
+    test_names TEXT NOT NULL DEFAULT '[]',
+    acceptance_refs TEXT NOT NULL DEFAULT '[]',
+    last_status TEXT NOT NULL DEFAULT '',
+    last_run_id TEXT NOT NULL DEFAULT '',
+    last_run_at TEXT NOT NULL DEFAULT '',
+    is_gap INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_test_coverage_project ON test_coverage(project_id);
+
+-- User-authored test intent (business/process/data flows, edge cases). Mirrors the
+-- canonical tests/test_directives.json; status + linked_test_ids are maintained by
+-- the recorder, the rest is user-owned.
+CREATE TABLE IF NOT EXISTS test_directive (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    kind TEXT NOT NULL DEFAULT 'business_flow',
+    title TEXT NOT NULL DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]',
+    expected_outcome TEXT NOT NULL DEFAULT '',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'uncovered',
+    linked_test_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL DEFAULT 'user',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_test_directive_project ON test_directive(project_id);
 """
 
 
@@ -427,6 +514,239 @@ def save_story_run(
         (run_id, storypack_id, story_id, story_title, agent_type, model, status,
          iterations, tool_calls, prompt_tokens, completion_tokens, total_tokens,
          cached_tokens, summary, _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Test ledger — per-POC coverage + run history (see TEST_AGENT_PLAN.md).
+# ---------------------------------------------------------------------------
+
+def save_test_run(
+    *, project_id: str = "default", storypack_id: str = "", run_id: str = "",
+    trigger: str = "build", status: str = "", totals: dict | None = None,
+    summary: str = "", started_at: str | None = None, finished_at: str | None = None,
+) -> int:
+    """Insert one test-run header; returns its row id."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO test_run (project_id, storypack_id, run_id, trigger, status, "
+        "totals_json, summary, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (project_id, storypack_id, run_id, trigger, status,
+         json.dumps(totals or {}), (summary or "")[:2000],
+         started_at or _now_iso(), finished_at or _now_iso()),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def save_test_case_results(test_run_id: int, project_id: str, cases: list[dict]) -> None:
+    """Bulk-insert per-case results for a test run."""
+    if not cases:
+        return
+    conn = _get_conn()
+    conn.executemany(
+        "INSERT INTO test_case_result (test_run_id, project_id, layer, target, "
+        "test_file, test_name, status, duration_ms, message, acceptance_refs, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                test_run_id, project_id, c.get("layer", ""), c.get("target", ""),
+                c.get("test_file", ""), c.get("test_name", ""), c.get("status", ""),
+                int(c.get("duration_ms", 0) or 0), (c.get("message", "") or "")[:2000],
+                json.dumps(c.get("acceptance_refs", [])), _now_iso(),
+            )
+            for c in cases
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def upsert_test_coverage(project_id: str, rows: list[dict]) -> None:
+    """Replace the current-state coverage snapshot for a project (delete + insert),
+    so removed tests/gaps don't linger."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM test_coverage WHERE project_id=?", (project_id,))
+    if rows:
+        conn.executemany(
+            "INSERT INTO test_coverage (project_id, layer, target, test_file, "
+            "test_names, acceptance_refs, last_status, last_run_id, last_run_at, "
+            "is_gap, reason, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    project_id, r.get("layer", ""), r.get("target", ""),
+                    r.get("test_file", ""), json.dumps(r.get("test_names", [])),
+                    json.dumps(r.get("acceptance_refs", [])), r.get("last_status", ""),
+                    r.get("last_run_id", ""), r.get("last_run_at", ""),
+                    1 if r.get("is_gap") else 0, (r.get("reason", "") or "")[:500], _now_iso(),
+                )
+                for r in rows
+            ],
+        )
+    conn.commit()
+    conn.close()
+
+
+def list_test_runs(project_id: str | None = None, limit: int = 50) -> list[dict]:
+    conn = _get_conn()
+    if project_id:
+        rows = conn.execute(
+            "SELECT * FROM test_run WHERE project_id=? ORDER BY id DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM test_run ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_test_run(test_run_id: int) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM test_run WHERE id=?", (test_run_id,)).fetchone()
+    cases = conn.execute(
+        "SELECT * FROM test_case_result WHERE test_run_id=? ORDER BY id", (test_run_id,)
+    ).fetchall()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["cases"] = [dict(c) for c in cases]
+    return d
+
+
+def get_test_coverage(project_id: str = "default") -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM test_coverage WHERE project_id=? ORDER BY layer, is_gap, target",
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---- Test directives (user-authored intent) ----
+
+_DIRECTIVE_COLS = (
+    "id", "project_id", "kind", "title", "steps_json", "expected_outcome",
+    "priority", "status", "linked_test_ids_json", "created_by", "updated_at",
+)
+
+
+def _directive_row(project_id: str, d: dict) -> tuple:
+    return (
+        str(d.get("id", "")), project_id, d.get("kind", "business_flow"),
+        (d.get("title", "") or "")[:500], json.dumps(d.get("steps", [])),
+        (d.get("expected_outcome", "") or "")[:2000], d.get("priority", "medium"),
+        d.get("status", "uncovered"), json.dumps(d.get("linked_test_ids", [])),
+        d.get("created_by", "user"), d.get("updated_at", "") or _now_iso(),
+    )
+
+
+def upsert_test_directive(project_id: str, directive: dict) -> None:
+    conn = _get_conn()
+    ph = ",".join("?" for _ in _DIRECTIVE_COLS)
+    conn.execute(
+        f"INSERT OR REPLACE INTO test_directive ({','.join(_DIRECTIVE_COLS)}) VALUES ({ph})",
+        _directive_row(project_id, directive),
+    )
+    conn.commit()
+    conn.close()
+
+
+def replace_test_directives(project_id: str, directives: list[dict]) -> None:
+    """Sync the whole directive set for a project (delete + insert), keeping the DB
+    mirror in step with the canonical tests/test_directives.json."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM test_directive WHERE project_id=?", (project_id,))
+    ph = ",".join("?" for _ in _DIRECTIVE_COLS)
+    if directives:
+        conn.executemany(
+            f"INSERT OR REPLACE INTO test_directive ({','.join(_DIRECTIVE_COLS)}) VALUES ({ph})",
+            [_directive_row(project_id, d) for d in directives],
+        )
+    conn.commit()
+    conn.close()
+
+
+def list_test_directives(project_id: str = "default") -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM test_directive WHERE project_id=? ORDER BY "
+        "CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_test_directive(directive_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM test_directive WHERE id=?", (directive_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_test_directive(directive_id: str) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM test_directive WHERE id=?", (directive_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_recoverable_checkpoint(
+    *, run_id: str = "", storypack_id: str = "", story_id: str = "",
+    story_title: str = "", agent_type: str = "", scratch_path: str,
+    target_dir: str = "", verified: bool = False,
+) -> int:
+    """Record a preserved scratch dir from a capped run so it can be recovered."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO recoverable_checkpoints (run_id, storypack_id, story_id, "
+        "story_title, agent_type, scratch_path, target_dir, verified, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (run_id, storypack_id, story_id, story_title, agent_type, scratch_path,
+         target_dir, 1 if verified else 0, "preserved", _now_iso()),
+    )
+    conn.commit()
+    cid = cur.lastrowid
+    conn.close()
+    return cid
+
+
+def list_recoverable_checkpoints(status: str | None = "preserved", limit: int = 50) -> list[dict]:
+    conn = _get_conn()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM recoverable_checkpoints WHERE status=? ORDER BY id DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM recoverable_checkpoints ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_recoverable_checkpoint(checkpoint_id: int) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM recoverable_checkpoints WHERE id=?", (checkpoint_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_checkpoint_status(checkpoint_id: int, status: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE recoverable_checkpoints SET status=? WHERE id=?", (status, checkpoint_id)
     )
     conn.commit()
     conn.close()

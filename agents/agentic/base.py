@@ -275,6 +275,84 @@ class AgentBase:
         """Per-story model override (Story.model), if any."""
         return getattr(story, "model", None) if story is not None else None
 
+    def _preserve_checkpoint(
+        self, *, scratch, target_dir, registry, story
+    ) -> Optional[dict[str, Any]]:
+        """#4 — when a run ends WITHOUT an explicit finish_story success (typically it
+        hit the iteration cap), preserve its scratch instead of discarding the work.
+
+        If the last validation was green (build passed, no edits since), the work is
+        VERIFIED and promotable — recorded so it can be recovered in one click rather
+        than lost (the 645K-token-waste failure mode). Returns a dict for RunResult.
+        """
+        try:
+            if scratch is None or not Path(scratch).exists():
+                return None
+            meta = registry.context.metadata
+            lv = meta.get("last_validation") or {}
+            verified = bool(lv.get("ok")) and not bool(meta.get("dirty_since_validation"))
+            cid = None
+            try:
+                import state_store
+                cid = state_store.save_recoverable_checkpoint(
+                    run_id=self.ctx.run_id,
+                    storypack_id=self.ctx.storypack_id,
+                    story_id=(story.id if story else ""),
+                    story_title=(story.title if story else ""),
+                    agent_type=self.agent_id,
+                    scratch_path=str(scratch),
+                    target_dir=str(target_dir),
+                    verified=verified,
+                )
+            except Exception:  # noqa: BLE001 — persistence must not break the run
+                pass
+            if verified:
+                self._emit(
+                    "warn",
+                    f"♻ RECOVERABLE checkpoint #{cid}: run ended without finish_story, "
+                    f"but the last validation ({lv.get('tool')}) was GREEN — work PRESERVED, "
+                    f"not discarded. Recover it from the dashboard.",
+                    f"scratch: {scratch}",
+                )
+            else:
+                self._emit(
+                    "info",
+                    f"Scratch preserved (checkpoint #{cid}) — last validation not confirmed "
+                    "green; review before recovering.",
+                    f"scratch: {scratch}",
+                )
+            return {"checkpoint_id": cid, "verified": verified, "scratch": str(scratch)}
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _log_promotion(self, manifest: Optional[dict[str, Any]]) -> None:
+        """#3 — surface exactly what a promote changed: file counts, any SHARED/
+        foundational files touched (scope-creep smell), deletions, and the backup path."""
+        if not manifest:
+            return
+        added = manifest.get("added") or []
+        modified = manifest.get("modified") or []
+        deleted = manifest.get("deleted") or []
+        shared = manifest.get("shared_changed") or []
+        n = len(added) + len(modified) + len(deleted)
+        detail = (
+            f"added ({len(added)}): {added}\n"
+            f"modified ({len(modified)}): {modified}\n"
+            f"deleted ({len(deleted)}): {deleted}\n"
+            f"backup: {manifest.get('backup_path')}"
+        )
+        if shared:
+            self._emit(
+                "warn",
+                f"Promoted {n} file(s) — ⚠ touched SHARED/foundational file(s): "
+                f"{', '.join(shared)}. Confirm this was in scope.",
+                detail,
+            )
+        else:
+            self._emit("info", f"Promoted {n} file(s) to workspace.", detail)
+        if deleted:
+            self._emit("warn", f"⚠ Promote DELETED {len(deleted)} file(s): {', '.join(deleted[:12])}")
+
 
 # ---------------------------------------------------------------------------
 

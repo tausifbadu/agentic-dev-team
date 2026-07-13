@@ -291,19 +291,96 @@ def create_scratch_copy(source_dir: Path, prefix: str) -> Path:
     return target
 
 
-def promote_scratch_copy(scratch_dir: Path, destination_dir: Path) -> None:
+# Foundational / shared files whose modification has wide blast radius — a narrow
+# story that changes these is a scope-creep smell worth surfacing on promote (#3).
+_SHARED_FILES = {"App.jsx", "App.tsx", "main.jsx", "main.py", "index.html",
+                 "package.json", "package-lock.json", "requirements.txt"}
+_SHARED_SUFFIXES = (".config.js", ".config.ts")
+_MANIFEST_IGNORE = {"node_modules", "dist", "build", ".venv", "__pycache__", ".git"}
+
+
+def _list_rel_files(root: Path) -> dict:
+    out: dict = {}
+    if not root.exists():
+        return out
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        if any(part in _MANIFEST_IGNORE for part in rel.parts):
+            continue
+        out[str(rel)] = p
+    return out
+
+
+def _promote_manifest(scratch_dir: Path, destination_dir: Path) -> dict:
+    """What a promote would change: added / modified / deleted files, plus any
+    SHARED/foundational files touched (high blast radius)."""
+    src = _list_rel_files(scratch_dir)
+    dst = _list_rel_files(destination_dir)
+    added, modified, deleted = [], [], []
+    for rel, sp in src.items():
+        if rel not in dst:
+            added.append(rel)
+        else:
+            try:
+                if sp.read_bytes() != dst[rel].read_bytes():
+                    modified.append(rel)
+            except OSError:
+                modified.append(rel)
+    deleted = [rel for rel in dst if rel not in src]
+    changed = added + modified + deleted
+    shared = [r for r in changed
+              if Path(r).name in _SHARED_FILES or Path(r).name.endswith(_SHARED_SUFFIXES)]
+    return {"added": sorted(added), "modified": sorted(modified),
+            "deleted": sorted(deleted), "shared_changed": sorted(shared)}
+
+
+def _backup_destination(destination_dir: Path, label: str = "") -> str | None:
+    """Snapshot the live destination before it is overwritten, so a promote is
+    reversible. Keeps the most recent 10 backups per destination."""
+    if not destination_dir.exists():
+        return None
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    tag = f"{destination_dir.name}_{ts}" + (f"_{label}" if label else "")
+    backup_root = destination_dir.parent / ".backups"
+    backup_dir = backup_root / tag
+    try:
+        backup_root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(destination_dir, backup_dir, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+    except OSError:
+        return None
+    try:  # prune old backups for this destination
+        peers = sorted(d for d in backup_root.glob(f"{destination_dir.name}_*") if d.is_dir())
+        for old in peers[:-10]:
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
+    return str(backup_dir)
+
+
+def promote_scratch_copy(
+    scratch_dir: Path, destination_dir: Path, *, backup: bool = True, label: str = "",
+) -> dict:
     """Replace destination with validated scratch output.
 
-    Skips node_modules/dist/etc. to keep the workspace lightweight.
-    Uses dirs_exist_ok to merge into an existing directory when rmtree
-    fails (e.g., locked files on macOS).
+    #3 safety: before overwriting, snapshot the destination to a timestamped backup
+    and compute a change manifest (added/modified/deleted + any SHARED/foundational
+    files touched) so every promote is reversible and attributable. Returns
+    {backup_path, added, modified, deleted, shared_changed}.
+
+    Skips node_modules/dist/etc. Uses dirs_exist_ok to merge into an existing
+    directory when rmtree fails (e.g., locked files on macOS).
     """
+    manifest = _promote_manifest(scratch_dir, destination_dir)
+    manifest["backup_path"] = _backup_destination(destination_dir, label) if backup else None
     if destination_dir.exists():
         try:
             shutil.rmtree(destination_dir)
         except OSError:
             pass
     shutil.copytree(scratch_dir, destination_dir, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+    return manifest
 
 
 _ROUTE_RE = re.compile(
@@ -314,11 +391,16 @@ _ROUTE_RE = re.compile(
 )
 _MODEL_CLASS_RE = re.compile(r'^class\s+(\w+)\(.*BaseModel.*\):', re.MULTILINE)
 _FIELD_RE = re.compile(r'^\s+(\w+)\s*:\s*(.+?)(?:\s*=.*)?$', re.MULTILINE)
+# str-Enum classes and their string VALUES — the accepted vocabulary the frontend
+# must conform to (statuses, categories, priorities, sort keys, etc.). These are
+# what drift between backend and frontend and cause 400s, so we surface them.
+_ENUM_CLASS_RE = re.compile(r'^class\s+(\w+)\s*\([^)]*\bEnum\b[^)]*\):', re.MULTILINE)
+_ENUM_MEMBER_RE = re.compile(r'^\s+(\w+)\s*=\s*["\'](.+?)["\']', re.MULTILINE)
 
 
 def extract_api_contract(backend_root: Path) -> dict:
     """Scan backend Python files to extract a lightweight API route + model summary."""
-    contract: dict = {"routes": [], "models": []}
+    contract: dict = {"routes": [], "models": [], "enums": {}}
     if not backend_root.exists():
         return contract
 
@@ -362,6 +444,18 @@ def extract_api_contract(backend_root: Path) -> dict:
             if fields:
                 contract["models"].append({"name": class_name, "fields": fields})
 
+        for em in _ENUM_CLASS_RE.finditer(content):
+            enum_name = em.group(1)
+            enum_end = content.find("\nclass ", em.end())
+            if enum_end == -1:
+                enum_end = len(content)
+            values = [mm.group(2) for mm in _ENUM_MEMBER_RE.finditer(content[em.end():enum_end])]
+            if values:
+                contract["enums"][enum_name] = values
+
+    # Flat union of every accepted enum value — the vocabulary the frontend must
+    # send. Used by the contract-lint (check_contract) to flag drifted values.
+    contract["enum_values"] = sorted({v for vals in contract["enums"].values() for v in vals})
     return contract
 
 

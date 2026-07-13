@@ -189,20 +189,30 @@ Implement the story. When validated, call `publish_contract` and then `finish_st
             model=self._story_model(story),
         )
 
+        ckpt = None
         if outcome.success:
-            promote_scratch_copy(scratch, self.backend_dir)
+            manifest = promote_scratch_copy(
+                scratch, self.backend_dir, label=(story.id if story else ""),
+            )
+            self._log_promotion(manifest)
             self._record_scope(story, outcome.summary)
             self._emit("info", "Backend story complete; scratch promoted to workspace.",
                        outcome.summary)
         else:
             self._emit("error", f"Backend story failed: {outcome.summary}", outcome.error)
+            ckpt = self._preserve_checkpoint(
+                scratch=scratch, target_dir=self.backend_dir, registry=registry, story=story,
+            )
 
+        meta = dict(outcome.metadata or {})
+        if ckpt:
+            meta["recoverable_checkpoint"] = ckpt
         return RunResult(
             success=outcome.success,
             summary=outcome.summary or outcome.final_text,
             iterations=outcome.iterations,
             tool_calls=registry.context.tool_call_count,
-            metadata=outcome.metadata,
+            metadata=meta,
         )
 
     def handle_message(self, msg) -> Optional[dict]:

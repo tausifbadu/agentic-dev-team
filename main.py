@@ -197,7 +197,28 @@ def _run_legacy_pipeline(pack: StoryPack) -> bool:
     return ok
 
 
+def _run_standalone_tests() -> None:
+    """`python main.py --test [project_id]` — run the Test Agent against an existing
+    workspace and record the run into the per-POC test ledger. Default project."""
+    from agents.test_runner import run_tests_for_project
+
+    project_id = sys.argv[2] if len(sys.argv) > 2 else "default"
+
+    def _progress(level, message, detail=None):
+        print(f"[test] {message}", flush=True)
+
+    print(f"Running tests for project '{project_id}'...\n", flush=True)
+    res = run_tests_for_project(project_id, trigger="manual", on_progress=_progress)
+    print(f"\n{'PASS' if res['success'] else 'FAIL'}: {res['summary']}", flush=True)
+    print(f"Ledger updated for workspace: {res['workspace_dir']}", flush=True)
+    sys.exit(0 if res["success"] else 1)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        _run_standalone_tests()
+        return
+
     use_legacy = _use_legacy_cli()
     _strip_legacy_flag_from_argv()
 

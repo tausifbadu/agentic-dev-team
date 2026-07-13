@@ -1411,6 +1411,44 @@ enhance_state: dict = {
     "phase": "idle",
 }
 
+# Standalone test-run state (single-flight, mirrors enhance_state/fix_state).
+test_run_state: dict = {
+    "running": False,
+    "project_id": None,
+    "run_id": None,
+    "phase": "idle",
+    "success": None,
+    "summary": "",
+}
+
+
+def run_tests_background(project_id: str = "default") -> None:
+    """Run the Test Agent standalone against an existing workspace (dashboard 'Run
+    tests' action). Records the run into the per-POC ledger with trigger='manual'."""
+    global test_run_state, _current_run_id
+    import uuid as _uuid
+    from agents.test_runner import run_tests_for_project
+
+    run_id = f"testrun_{_uuid.uuid4().hex[:8]}"
+    _current_run_id = run_id
+    test_run_state = {
+        "running": True, "project_id": project_id, "run_id": run_id,
+        "phase": "testing", "success": None, "summary": "",
+    }
+
+    def _progress(level, message, detail=None):
+        _log(None, "test", message, level=level, detail=detail)
+
+    try:
+        res = run_tests_for_project(
+            project_id, run_id=run_id, trigger="manual", on_progress=_progress)
+        test_run_state.update(
+            running=False, phase="done",
+            success=res.get("success"), summary=res.get("summary", ""))
+    except Exception as exc:  # noqa: BLE001
+        _log(None, "test", f"Standalone test run failed: {exc}", level="error")
+        test_run_state.update(running=False, phase="error", success=False, summary=str(exc))
+
 MAX_ENHANCE_RETRIES = 2
 
 
@@ -1436,6 +1474,50 @@ def _build_enhancement_context(description: str, context: str, workspace_root: P
     return enhancement_context
 
 
+def _run_enhance_agentic(
+    story: Story, agent_type: str, description: str, all_stories: list, workspace_root: Path,
+) -> tuple[bool, str]:
+    """Run an enhancement through the agentic ReAct agent instead of the legacy
+    plan->patch path. Gains: the full iter/tool-result log stream, the design-system
+    skill (professional register), and a DoD-gated promote (build + check_ui). The
+    agent self-heals internally, so no outer PM heal loop is needed here.
+    """
+    from agents.agentic.base import RunContext, Budget
+    from agents.agentic.frontend import FrontendAgent
+    from agents.agentic.backend import BackendAgent
+    from agents.bus import MessageBus
+
+    bus = MessageBus()
+    ctx = RunContext(
+        storypack_id=_current_pack_id or f"enhance-{story.id}",
+        run_id=_current_run_id or f"enhance-run-{story.id}",
+        workspace_dir=workspace_root,
+        bus=bus,
+        budget=Budget.from_env(),
+        requirement_text=description,
+        all_stories=list(all_stories) if all_stories else [story],
+    )
+
+    def _progress(level, message, detail=None):
+        _log(story.id, agent_type, message, level=level, detail=detail)
+
+    AgentCls = BackendAgent if agent_type == "backend" else FrontendAgent
+    agent = AgentCls(ctx, on_progress=_progress)
+    agent.register_with_bus()
+    try:
+        outcome = agent.run(story)
+    finally:
+        try:
+            agent.unregister()
+        except Exception:  # noqa: BLE001
+            pass
+
+    if outcome.success:
+        _log(story.id, agent_type, f"Enhancement implemented (agentic): {(outcome.summary or '')[:200]}")
+        return True, outcome.summary or outcome.final_text or "ok"
+    return False, outcome.summary or outcome.error or "Enhancement failed"
+
+
 def _run_single_enhance_agent(
     story: Story,
     agent_type: str,
@@ -1444,7 +1526,12 @@ def _run_single_enhance_agent(
     all_stories: list,
     workspace_root: Path,
 ) -> tuple[bool, str]:
-    """Implement one enhancement story with heal loop. Returns (ok, message)."""
+    """Implement one enhancement story. With AGENTIC_ENHANCE set, route through the
+    agentic ReAct agent (rich logs + design skill + DoD gate); otherwise use the legacy
+    plan->patch path + PM heal loop."""
+    if _env_truthy("AGENTIC_ENHANCE"):
+        return _run_enhance_agentic(story, agent_type, description, all_stories, workspace_root)
+
     progress = _make_progress_cb(story.id, agent_type)
     impl_fn = implement_backend if agent_type == "backend" else implement_frontend
 

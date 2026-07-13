@@ -80,6 +80,43 @@ export const api = {
   getTestResults: (packId) =>
     request(`/tests/results${packId ? `?storypack_id=${packId}` : ""}`),
 
+  // ---- Test Coverage (per-POC ledger + guidance + seed) ----
+  getTestCoverage: (projectId = "default") =>
+    request(`/tests/coverage?project_id=${encodeURIComponent(projectId)}`),
+
+  listTestRuns: (projectId = "default", limit = 50) =>
+    request(`/tests/runs?project_id=${encodeURIComponent(projectId)}&limit=${limit}`),
+
+  getTestRun: (id) => request(`/tests/runs/${id}`),
+
+  runTests: (projectId = "default") =>
+    request("/tests/run", { method: "POST", body: JSON.stringify({ project_id: projectId }) }),
+
+  getTestRunStatus: () => request("/tests/run/status"),
+
+  listDirectives: (projectId = "default") =>
+    request(`/tests/directives?project_id=${encodeURIComponent(projectId)}`),
+
+  addDirective: (directive) =>
+    request("/tests/directives", { method: "POST", body: JSON.stringify(directive) }),
+
+  updateDirective: (id, directive) =>
+    request(`/tests/directives/${id}`, { method: "PUT", body: JSON.stringify(directive) }),
+
+  deleteDirective: (id, projectId = "default") =>
+    request(`/tests/directives/${id}?project_id=${encodeURIComponent(projectId)}`, {
+      method: "DELETE",
+    }),
+
+  getSeed: (projectId = "default") =>
+    request(`/tests/seed?project_id=${encodeURIComponent(projectId)}`),
+
+  saveSeed: (projectId, data) =>
+    request("/tests/seed", { method: "PUT", body: JSON.stringify({ project_id: projectId, data }) }),
+
+  regenerateSeed: (projectId = "default") =>
+    request(`/tests/seed/regenerate?project_id=${encodeURIComponent(projectId)}`, { method: "POST" }),
+
   getWorkspaceFiles: (projectId) =>
     request(
       `/workspace/files${projectId && projectId !== "default" ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,

@@ -1,0 +1,158 @@
+HelpHub — Customer Support Desk (ticketing console with analytics)
+
+Context:
+Build a self-contained customer support desk web app for a small SaaS company's
+support team. It manages customers, support agents, and the full lifecycle of
+support tickets (create → triage → work → resolve → close), with a threaded reply
+history per ticket and an analytics dashboard. FastAPI + SQLite backend, React +
+Vite + Tailwind frontend, no auth, runs on localhost. Seed the database on first
+run with a realistic sample dataset (see "Seed data") so every screen has content.
+
+Goal:
+A support agent can land on a dashboard of live metrics, work a drag-and-drop
+Kanban board that moves tickets across stages, drill into a filterable queue,
+open a ticket to read/append the conversation, change its status / priority /
+assignee inline, and create new tickets, customers, and agents — all without a
+page reload.
+
+Note to the Planner (PM agent) — decompose SMALL and SMARTLY:
+Do NOT emit large, multi-feature stories. Slice this into many small, independently
+shippable, independently testable vertical stories, and order them so each builds
+only on what came before. Follow these rules when creating the story list:
+- One story = one thin slice: a single endpoint, or a single screen/component, or a
+  single interaction — not "build the backend" or "build the tickets page".
+- Sequence by dependency: data model + seed FIRST, then read endpoints, then write
+  endpoints, then the screens that consume them, then cross-cutting polish. A story
+  must never depend on a story that comes after it.
+- Prefer 8–15 small stories over 3–4 big ones. If a story's acceptance criteria have
+  more than ~3 bullets or touch both a new endpoint AND a new screen, SPLIT it.
+- Every story states crisp, checkable acceptance criteria a validator can prove
+  (e.g. "GET /api/tickets?status=open returns only open tickets" or "dragging a card
+  to Resolved issues PATCH status=resolved and the card moves column").
+- Keep backend and frontend as separate stories so each is validated by its own
+  tooling (http_check for endpoints, build + rendered-DOM check for UI).
+A reasonable slicing looks like: (1) DB schema + seed data; (2) customers list+create;
+(3) agents list+create; (4) tickets list endpoint w/ filters+pagination; (5) ticket
+detail + comments endpoints; (6) create-ticket + PATCH endpoints w/ transition rules;
+(7) analytics overview endpoint; (8) app shell + sidebar nav; (9) dashboard KPIs +
+charts; (10) tickets queue table w/ filters; (11) ticket detail view + reply composer;
+(12) Kanban board w/ drag-and-drop; (13) create forms (ticket/customer/agent). Adjust
+as you see fit, but keep them this small.
+
+Data model (SQLite, created on startup if missing):
+- customers: id, name (req), email (req, valid), company (optional), plan
+  (one of free|pro|enterprise; default free), created_at.
+- agents: id, name (req), email (req, valid), team (one of tier1|tier2|billing;
+  default tier1), active (bool, default true), created_at.
+- tickets: id, subject (req), description, customer_id (req, FK → customers),
+  assigned_agent_id (optional, FK → agents), priority (low|medium|high|urgent;
+  default medium), status (open|in_progress|waiting|resolved|closed; default open),
+  category (question|bug|billing|feature; default question), created_at, updated_at,
+  due_at (SLA target: created_at + hours-by-priority — urgent 4h, high 8h,
+  medium 24h, low 72h).
+- comments: id, ticket_id (req, FK → tickets), author_type (agent|customer),
+  author_name, body (req), created_at.
+
+Backend (FastAPI, SQLite, Pydantic — add all of the following /api routes):
+- Customers: GET /api/customers (list), POST /api/customers (create; 400 on invalid
+  email / missing name).
+- Agents: GET /api/agents (list), POST /api/agents (create; 400 on invalid input).
+- Tickets:
+  - GET /api/tickets — list with query params: status, priority, assigned_agent_id,
+    customer_id, category, q (case-insensitive search over subject+description),
+    sort (created_at|priority|due_at, default created_at desc), page, page_size
+    (default 20). Returns items + total count for pagination. Each item includes the
+    joined customer name and assigned agent name (not just ids).
+  - GET /api/tickets/{id} — full ticket incl. customer + agent detail and its comments
+    ordered oldest→newest. 404 if missing.
+  - POST /api/tickets — create (subject + customer_id required; unknown customer_id →
+    400). Sets due_at from priority. Returns the created ticket.
+  - PATCH /api/tickets/{id} — partial update of status, priority, assigned_agent_id,
+    category. Validate enums (400 on invalid value) and that assigned_agent_id
+    references an existing agent. Bumps updated_at. Reject the closed→open transition
+    with a 400 (a closed ticket must be reopened via a distinct in_progress step).
+  - POST /api/tickets/{id}/comments — append a reply (body required). Adding an agent
+    reply while status=open auto-advances status to in_progress.
+- Analytics: GET /api/analytics/overview — a single aggregation endpoint returning:
+  open_count, in_progress_count, resolved_last_7d, avg_resolution_hours (over
+  resolved/closed tickets), sla_breach_count (tickets past due_at and not
+  resolved/closed), by_status (counts per status), by_priority (counts per priority),
+  by_agent (assigned open+in_progress count per active agent, incl. name), and
+  created_per_day (count per day for the last 14 days, zero-filled).
+- Reuse one SQLite database + connection setup and CORS. Use Optional[X] from typing,
+  NOT X | None. Do not break routes as you add them.
+
+Seed data (only if the DB is empty): ~6 customers across plans, ~4 agents across
+teams, and ~25 tickets spread over the last 14 days with a realistic mix of
+statuses/priorities/categories and a few threaded comments, so the dashboard and
+queue are populated immediately.
+
+Frontend (React 18 + Vite + Tailwind; left sidebar nav; fetch via relative /api):
+
+Frontend architecture (CRITICAL — this is how multiple stories coexist):
+`src/App.jsx` is a SHARED file owned by no single feature story. Each screen/feature
+lives in its OWN component file under `src/screens/` (e.g. src/screens/Dashboard.jsx,
+Board.jsx, TicketsQueue.jsx, TicketDetail.jsx, CreateForms.jsx). A feature story must:
+create/edit only its own screen file(s), and make the MINIMAL edit to App.jsx —
+import its component and render it for its route — WITHOUT removing or rewriting any
+other route, import, or component already there. Never replace App.jsx wholesale and
+never collapse everything into one file. This keeps the app shell + every screen
+additive so no story overwrites another's work.
+
+- Sidebar: Dashboard, Board, Tickets, Customers, Agents. Highlight the active route.
+- Board (Kanban) — the centerpiece interaction; the UX here must be best-in-class:
+  - Columns, one per workable stage: Open, In Progress, Waiting, Resolved, Closed.
+    Each column header shows its name, a live count, and a colored accent matching the
+    status badge color used elsewhere. Tickets appear as cards under their status
+    column, ordered by priority then age.
+  - A card shows subject, customer, assignee (avatar/initials), a priority badge, and
+    an overdue marker when past due_at. Keep cards compact and scannable.
+  - Drag a card from one column and drop it on another to change its status: on drop,
+    optimistically move the card immediately, fire PATCH /api/tickets/{id} with the new
+    status, and on error roll the card back to its original column with an inline toast.
+    Respect the backend transition rules — dragging a Closed card onto Open must be
+    refused: reject it in the UI (don't allow the drop, or roll back) and show why.
+  - Drag UX details that make it feel excellent: a grab cursor + subtle lift/shadow on
+    the dragged card; the source card shows a dimmed placeholder gap; the hovered target
+    column highlights and shows an insertion indicator; animate the card settling into
+    place (honor prefers-reduced-motion — no motion when set); never block the UI while
+    the PATCH is in flight.
+  - Fully keyboard-accessible (do NOT rely on pointer drag alone): a card is focusable,
+    and a keyboard user can move it between columns (e.g. pick up with Space/Enter, move
+    with arrow keys, drop with Space/Enter, Esc to cancel) OR via a per-card status menu
+    as an equivalent fallback. Announce moves with an aria-live region.
+  - Clicking (not dragging) a card opens the ticket detail. Implement drag with native
+    HTML5 drag-and-drop (draggable + dragstart/dragover/drop) — NO heavy drag library
+    required; the goal is a smooth, accessible, dependency-light board.
+- Dashboard: a row of KPI cards (Open, In Progress, Resolved (7d), Avg resolution
+  hrs, SLA breaches) and a set of simple charts rendered with lightweight inline
+  SVG/CSS (NO heavy chart library required): a status breakdown (donut or stacked
+  bar), a priority bar chart, an "agent workload" bar list, and a 14-day
+  "tickets created per day" bar/line. Tabular figures for the numbers.
+- Tickets: a filterable, sortable, paginated table. Filter controls for status,
+  priority, assignee, category, and a search box (debounced). Status and priority
+  render as color-coded badges. Rows show subject, customer, assignee, priority,
+  status, and relative age; overdue rows (past due_at, not resolved/closed) get a
+  subtle "overdue" marker. Clicking a row opens the ticket detail.
+- Ticket detail (route or side drawer): header with subject + meta; inline controls
+  to change status, priority, and assignee (PATCH on change, optimistic update with
+  error rollback); the comment thread; and a reply composer (textarea + submit with
+  loading/disabled state) that appends the new comment and refreshes the thread.
+- New Ticket: a "New Ticket" action opening a form (customer dropdown loaded from
+  /api/customers, subject, description, priority, category). Client-side validation
+  with inline field errors; on success close and refresh the queue.
+- Customers & Agents: list tables each with a "New …" form (modal or side panel)
+  mirroring the create endpoints, with inline validation, loading state, and
+  refresh-on-success.
+- Every list/loading state has a skeleton or spinner; every empty state has a helpful
+  message + primary action; backend validation errors surface inline near the field.
+
+Constraints:
+- Backend: Python 3.9+, FastAPI, SQLite, Pydantic. Use Optional[X], not X | None.
+- Frontend: React 18+, Vite, Tailwind CSS. Fetch via relative /api URLs. No auth.
+  Localhost. Responsive on mobile and desktop.
+- Professional/enterprise look: solid surfaces, compact density, a single accent
+  color, clear type scale, inline SVG icons only (never emoji). Consistent status/
+  priority badge colors across the dashboard, queue, and detail views.
+- Accessibility: labelled inputs, visible focus states, 4.5:1 text contrast, keyboard
+  operable controls, aria-live on form errors.

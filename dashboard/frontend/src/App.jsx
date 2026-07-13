@@ -3,6 +3,7 @@ import Requirements from "./pages/Requirements";
 import StoryBoard from "./pages/StoryBoard";
 import AgentMonitor from "./pages/AgentMonitor";
 import TestResults from "./pages/TestResults";
+import TestCoverage from "./pages/TestCoverage";
 import Workspace from "./pages/Workspace";
 import DebugPanel from "./pages/DebugPanel";
 import AgentComms from "./pages/AgentComms";
@@ -16,6 +17,7 @@ const navItems = [
   { to: "/agents", label: "Agents", icon: IconAgent },
   { to: "/comms", label: "Comms", icon: IconComms },
   { to: "/tests", label: "Tests", icon: IconTest },
+  { to: "/coverage", label: "Coverage", icon: IconCoverage },
   { to: "/workspace", label: "Workspace", icon: IconCode },
   { to: "/workspace-chat", label: "WS Chat", icon: IconChat },
   { to: "/enhance", label: "Enhance", icon: IconEnhance },
@@ -71,6 +73,7 @@ export default function App() {
             <Route path="/stories/:packId" element={<StoryBoard />} />
             <Route path="/agents" element={<AgentMonitor />} />
             <Route path="/tests" element={<TestResults />} />
+            <Route path="/coverage" element={<TestCoverage />} />
             <Route path="/workspace" element={<Workspace />} />
             <Route path="/workspace-chat" element={<WorkspaceChat />} />
             <Route path="/comms" element={<AgentComms />} />
@@ -108,6 +111,16 @@ function IconTest() {
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="4 8 6.5 10.5 12 5" />
       <rect x="1.5" y="1.5" width="13" height="13" rx="2" />
+    </svg>
+  );
+}
+
+function IconCoverage() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 3h12v4H2z" />
+      <path d="M2 9h7v4H2z" />
+      <path d="M11 9h3v4h-3z" opacity="0.5" />
     </svg>
   );
 }
