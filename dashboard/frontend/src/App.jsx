@@ -1,5 +1,6 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import Requirements from "./pages/Requirements";
+import RequirementIntake from "./pages/RequirementIntake";
 import StoryBoard from "./pages/StoryBoard";
 import AgentMonitor from "./pages/AgentMonitor";
 import TestResults from "./pages/TestResults";
@@ -70,6 +71,7 @@ export default function App() {
         <div key={location.pathname} className="max-w-6xl mx-auto px-8 py-8 animate-fade-in-up">
           <Routes>
             <Route path="/" element={<Requirements />} />
+            <Route path="/intake/:sessionId" element={<RequirementIntake />} />
             <Route path="/stories/:packId" element={<StoryBoard />} />
             <Route path="/agents" element={<AgentMonitor />} />
             <Route path="/tests" element={<TestResults />} />

@@ -181,6 +181,27 @@ CREATE TABLE IF NOT EXISTS workspace_chat_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_ws_chat_usage_session ON workspace_chat_usage(session_id);
 
+-- PM requirement-intake: an interactive clarify -> revise -> confirm dialogue that
+-- precedes story creation. One session per requirement; messages are the Q&A turns.
+CREATE TABLE IF NOT EXISTS pm_intake_sessions (
+    id TEXT PRIMARY KEY,
+    requirement_id TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    status TEXT NOT NULL DEFAULT 'clarifying',
+    refined_text TEXT DEFAULT '',
+    storypack_id TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pm_intake_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pm_intake_msg_session ON pm_intake_messages(session_id, id);
+
 -- One row per (run, story) execution — an append-only history that survives
 -- re-runs (which overwrite the workspace files + story status). The generated
 -- code for each execution lives in tool_calls (write_file args), keyed by the
@@ -1424,6 +1445,84 @@ def get_workspace_chat_usage(session_id: str) -> dict:
         "turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
         "total_tokens": 0, "cached_tokens": 0,
     }
+
+
+# --- PM requirement intake (clarify -> revise -> confirm) ---
+
+def save_pm_intake_session(session_id: str, requirement_id: str, project_id: str = "default") -> None:
+    conn = _get_conn()
+    now = _now_iso()
+    row = conn.execute("SELECT id FROM pm_intake_sessions WHERE id = ?", (session_id,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE pm_intake_sessions SET requirement_id = ?, project_id = ?, updated_at = ? WHERE id = ?",
+            (requirement_id, project_id, now, session_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO pm_intake_sessions (id, requirement_id, project_id, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'clarifying', ?, ?)",
+            (session_id, requirement_id, project_id, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def touch_pm_intake_session(session_id: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE pm_intake_sessions SET updated_at = ? WHERE id = ?",
+        (_now_iso(), session_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pm_intake_session(session_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM pm_intake_sessions WHERE id = ?", (session_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_pm_intake_session(
+    session_id: str, *, status: str | None = None,
+    refined_text: str | None = None, storypack_id: str | None = None,
+) -> None:
+    sets, params = ["updated_at = ?"], [_now_iso()]
+    if status is not None:
+        sets.append("status = ?"); params.append(status)
+    if refined_text is not None:
+        sets.append("refined_text = ?"); params.append(refined_text)
+    if storypack_id is not None:
+        sets.append("storypack_id = ?"); params.append(storypack_id)
+    params.append(session_id)
+    conn = _get_conn()
+    conn.execute(f"UPDATE pm_intake_sessions SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+
+def add_pm_intake_message(session_id: str, role: str, content: str) -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO pm_intake_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (session_id, role, content, _now_iso()),
+    )
+    mid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return mid
+
+
+def list_pm_intake_messages(session_id: str, limit: int = 200) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM pm_intake_messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # --- Backward compatibility with JSON-based callers ---

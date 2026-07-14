@@ -240,6 +240,33 @@ export const api = {
   getWorkspaceChatUsage: (sessionId) =>
     request(`/workspace-chat/usage?session_id=${encodeURIComponent(sessionId)}`),
 
+  // --- PM requirement intake (clarify -> revise -> confirm) ---
+  startIntake: (text, project_id = "default") =>
+    request("/requirements/intake", {
+      method: "POST",
+      body: JSON.stringify({ text, project_id }),
+    }),
+
+  /** Returns raw fetch Response (NDJSON stream); caller reads body. */
+  postIntakeStream: ({ session_id, message }) =>
+    fetch(`${BASE}/requirements/intake/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id, message }),
+    }),
+
+  getIntakeMessages: (sessionId, limit = 400) =>
+    request(`/requirements/intake/${encodeURIComponent(sessionId)}/messages?limit=${limit}`),
+
+  synthesizeIntake: (sessionId) =>
+    request(`/requirements/intake/${encodeURIComponent(sessionId)}/synthesize`, { method: "POST" }),
+
+  finalizeIntake: (sessionId, refined_text = null) =>
+    request(`/requirements/intake/${encodeURIComponent(sessionId)}/finalize`, {
+      method: "POST",
+      body: JSON.stringify({ refined_text }),
+    }),
+
   listWorkspaceChatEdits: (sessionId, limit = 40) => {
     const q = new URLSearchParams();
     if (sessionId) q.set("session_id", sessionId);

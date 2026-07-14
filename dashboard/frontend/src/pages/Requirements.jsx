@@ -24,6 +24,8 @@ export default function Requirements() {
   const [promptFiles, setPromptFiles] = useState([]);
   const [text, setText] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
+  // Default: refine the requirement with the PM (clarify -> confirm) before stories.
+  const [clarifyFirst, setClarifyFirst] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   // PM "thinking" overlay: pmActive mounts it while the blocking submit is in
@@ -70,9 +72,16 @@ export default function Requirements() {
     if (!text.trim()) return;
     setLoading(true);
     setError(null);
-    setStoryCount(null);
-    setPmActive(true);
     try {
+      // Default path: open a PM intake dialogue to clarify before creating stories.
+      if (clarifyFirst) {
+        const res = await api.startIntake(text.trim(), projectId);
+        navigate(`/intake/${res.session_id}`, { state: { initialText: text.trim() } });
+        return;
+      }
+      // Skip path: one-shot PM story creation (original behaviour).
+      setStoryCount(null);
+      setPmActive(true);
       const result = await api.submitRequirement(text.trim(), autoApprove, { project_id: projectId });
       setText("");
       finishWithStories(result);
@@ -155,15 +164,29 @@ export default function Requirements() {
           </Field>
           <div className="flex items-center gap-4 flex-wrap">
             <Button type="submit" size="lg" loading={loading} disabled={loading || !text.trim()}>
-              {loading ? "Creating stories..." : "Submit to PM Agent"}
+              {loading
+                ? clarifyFirst ? "Opening intake…" : "Creating stories..."
+                : clarifyFirst ? "Refine with PM →" : "Submit to PM Agent"}
             </Button>
             <Toggle
-              checked={autoApprove}
-              onChange={(e) => setAutoApprove(e.target.checked)}
-              label="Auto-approve & run"
+              checked={clarifyFirst}
+              onChange={(e) => setClarifyFirst(e.target.checked)}
+              label="Clarify with PM first"
             />
+            {!clarifyFirst && (
+              <Toggle
+                checked={autoApprove}
+                onChange={(e) => setAutoApprove(e.target.checked)}
+                label="Auto-approve & run"
+              />
+            )}
             {error && <span className="text-sm text-status-danger-fg">{error}</span>}
           </div>
+          {clarifyFirst && (
+            <p className="text-[11px] text-fg-faint -mt-2">
+              The PM will ask clarifying questions and refine the requirement with you before any stories are created.
+            </p>
+          )}
         </form>
 
         {promptFiles.length > 0 && (

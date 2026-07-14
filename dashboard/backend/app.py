@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dashboard.backend.routes.requirements import router as requirements_router
+from dashboard.backend.routes.pm_intake import router as pm_intake_router
 from dashboard.backend.routes.storypacks import router as storypacks_router
 from dashboard.backend.routes.agents import router as agents_router
 from dashboard.backend.routes.tests import router as tests_router
@@ -54,6 +55,7 @@ app.add_middleware(
 )
 
 app.include_router(requirements_router, prefix="/api")
+app.include_router(pm_intake_router, prefix="/api")
 app.include_router(storypacks_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(tests_router, prefix="/api")

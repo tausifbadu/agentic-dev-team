@@ -441,10 +441,26 @@ def create_stories(requirement: Requirement) -> StoryPack:
 
     prompt_text = requirement.text + learning_addendum
     data = _call_pm_llm(client, prompt_text)
+    raw_stories = data.get("stories", []) if isinstance(data, dict) else []
+
+    # Rewrite story ids to a stable {req}_story_{n} scheme, and remap the
+    # dependency references so they still point at the renamed ids (the LLM emits
+    # deps against its own story_1/story_2 ids; without this remap every dep would
+    # dangle and cross-story ordering/gating would silently no-op).
+    id_map: dict[str, str] = {}
+    for index, story in enumerate(raw_stories, start=1):
+        new_id = f"{requirement.id}_story_{index}"
+        old_id = str(story.get("id", "")) if isinstance(story, dict) else ""
+        if old_id:
+            id_map[old_id] = new_id
+        id_map[f"story_{index}"] = new_id  # positional fallback
+
     normalized = []
-    for index, story in enumerate(data["stories"], start=1):
+    for index, story in enumerate(raw_stories, start=1):
         item = dict(story)
         item["id"] = f"{requirement.id}_story_{index}"
+        deps = item.get("dependencies") or []
+        item["dependencies"] = [id_map.get(str(d), str(d)) for d in deps]
         normalized.append(item)
 
     stories = [Story(**s) for s in normalized]
