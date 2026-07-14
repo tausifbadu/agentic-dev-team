@@ -9,3 +9,4 @@ node_modules/
 dist/
 dashboard/frontend/node_modules/
 dashboard/frontend/dist/
+.DS_Store
