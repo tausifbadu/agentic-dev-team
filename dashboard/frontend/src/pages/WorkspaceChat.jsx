@@ -33,6 +33,33 @@ function formatEvent(ev) {
   }
 }
 
+function fmt(n) {
+  return Number(n || 0).toLocaleString();
+}
+
+// Compact token-burn readout. Shows a session total and, during a turn, the live
+// running count; cache-hit % surfaces how much prompt was served from cache.
+function TokenMeter({ session, turn, busy }) {
+  const s = session || {};
+  const total = s.total_tokens || 0;
+  const hit = s.prompt_tokens ? Math.round((100 * (s.cached_tokens || 0)) / s.prompt_tokens) : 0;
+  return (
+    <div className="flex items-center gap-3 text-[11px] font-mono">
+      <span className="inline-flex items-center gap-1.5 rounded-md bg-surface-3/60 px-2 py-1 text-fg-muted" title="Total tokens burned this session (persisted)">
+        <span className="text-fg-faint">session</span>
+        <span className="text-fg-secondary font-semibold">{fmt(total)}</span>
+        <span className="text-fg-faint">tok</span>
+        {total > 0 && <span className="text-fg-faint">· cache {hit}%</span>}
+      </span>
+      {busy && turn && turn.total_tokens > 0 && (
+        <span className="inline-flex items-center gap-1 rounded-md bg-accent-muted/40 px-2 py-1 text-accent-hover" title="Tokens in the current turn">
+          +{fmt(turn.total_tokens)} this turn
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function WorkspaceChat() {
   const [projects, setProjects] = useState([]);
   const [projectId, setProjectId] = useState("default");
@@ -42,6 +69,8 @@ export default function WorkspaceChat() {
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState([]);
   const [error, setError] = useState(null);
+  const [sessionTokens, setSessionTokens] = useState(null);
+  const [turnTokens, setTurnTokens] = useState(null);
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -57,9 +86,12 @@ export default function WorkspaceChat() {
     try {
       const data = await api.createWorkspaceChatSession(pid || "default");
       setSessionId(data.session_id);
+      setTurnTokens(null);
       setLines([
         { role: "system", text: `Session ${data.session_id} — project "${data.project_id}"` },
       ]);
+      // New session starts at zero, but fetch in case the id ever pre-exists.
+      api.getWorkspaceChatUsage(data.session_id).then(setSessionTokens).catch(() => setSessionTokens(null));
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -83,7 +115,43 @@ export default function WorkspaceChat() {
     setInput("");
     setBusy(true);
     setError(null);
+    setTurnTokens({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 });
     setLines((prev) => [...prev, { role: "user", text: msg }]);
+
+    // Accumulate live per-call usage; commit the turn total to the session on "turn".
+    const applyUsage = (ev) => {
+      if (ev.scope === "call") {
+        setTurnTokens((t) => ({
+          prompt_tokens: (t?.prompt_tokens || 0) + (ev.prompt_tokens || 0),
+          completion_tokens: (t?.completion_tokens || 0) + (ev.completion_tokens || 0),
+          total_tokens: (t?.total_tokens || 0) + (ev.total_tokens || 0),
+          cached_tokens: (t?.cached_tokens || 0) + (ev.cached_tokens || 0),
+        }));
+      } else if (ev.scope === "turn") {
+        setTurnTokens({
+          prompt_tokens: ev.prompt_tokens || 0,
+          completion_tokens: ev.completion_tokens || 0,
+          total_tokens: ev.total_tokens || 0,
+          cached_tokens: ev.cached_tokens || 0,
+        });
+        setSessionTokens((s) => ({
+          turns: (s?.turns || 0) + 1,
+          prompt_tokens: (s?.prompt_tokens || 0) + (ev.prompt_tokens || 0),
+          completion_tokens: (s?.completion_tokens || 0) + (ev.completion_tokens || 0),
+          total_tokens: (s?.total_tokens || 0) + (ev.total_tokens || 0),
+          cached_tokens: (s?.cached_tokens || 0) + (ev.cached_tokens || 0),
+        }));
+      }
+    };
+    const handleEvent = (ev) => {
+      if (ev.type === "usage") {
+        applyUsage(ev);
+      } else if (ev.type === "assistant" && ev.content) {
+        setLines((prev) => [...prev, { role: "assistant", text: ev.content }]);
+      } else if (ev.type !== "assistant") {
+        setLines((prev) => [...prev, { role: "event", text: formatEvent(ev), raw: ev }]);
+      }
+    };
 
     try {
       const res = await api.postWorkspaceChatStream({
@@ -116,21 +184,12 @@ export default function WorkspaceChat() {
           } catch {
             continue;
           }
-          if (ev.type === "assistant" && ev.content) {
-            setLines((prev) => [...prev, { role: "assistant", text: ev.content }]);
-          } else if (ev.type !== "assistant") {
-            setLines((prev) => [...prev, { role: "event", text: formatEvent(ev), raw: ev }]);
-          }
+          handleEvent(ev);
         }
       }
       if (buf.trim()) {
         try {
-          const ev = JSON.parse(buf);
-          if (ev.type === "assistant" && ev.content) {
-            setLines((prev) => [...prev, { role: "assistant", text: ev.content }]);
-          } else {
-            setLines((prev) => [...prev, { role: "event", text: formatEvent(ev), raw: ev }]);
-          }
+          handleEvent(JSON.parse(buf));
         } catch {
           /* ignore */
         }
@@ -177,6 +236,10 @@ export default function WorkspaceChat() {
         {sessionId && (
           <span className="text-[11px] font-mono text-fg-faint truncate max-w-[200px]">{sessionId}</span>
         )}
+
+        <div className="ml-auto">
+          <TokenMeter session={sessionTokens} turn={turnTokens} busy={busy} />
+        </div>
       </div>
 
       {error && (

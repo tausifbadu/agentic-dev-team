@@ -6,12 +6,21 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import threading
+import time
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    BadRequestError,
+    OpenAI,
+)
 
 import state_store
 
@@ -28,6 +37,79 @@ MAX_GREP_MATCHES = 50
 MAX_GREP_FILES = 400
 MAX_ITERATIONS = 18
 MODEL_NAME = os.getenv("WORKSPACE_CHAT_MODEL", "codex/gpt-5.5")
+
+# Retry/backoff for the shared gateway (429 / 5xx / transport / empty-choices).
+# Mirrors the agent pipeline's resilience locally — but deliberately does NOT touch
+# the shared token accumulator (agents.llm_client._USAGE), so build telemetry stays
+# clean even if a chat turn runs during a build.
+_MAX_RETRIES = int(os.getenv("WORKSPACE_CHAT_MAX_RETRIES", "5"))
+_BACKOFF_BASE = float(os.getenv("WORKSPACE_CHAT_BACKOFF_BASE", "3"))
+_BACKOFF_MAX = float(os.getenv("WORKSPACE_CHAT_BACKOFF_MAX", "30"))
+# How many pre-overwrite backups to keep per file under <root>/.backups/wschat/.
+_MAX_FILE_BACKUPS = 10
+
+
+def _backoff(attempt: int) -> float:
+    return min(_BACKOFF_BASE * (2 ** (attempt - 1)), _BACKOFF_MAX)
+
+
+def _robust_chat(client: OpenAI, **kwargs: Any):
+    """chat.completions.create with retry on 429/5xx/transport errors and the
+    gateway's empty-choices response, plus the temperature-unsupported fallback.
+    Raises after the retry budget so the turn surfaces a clear error instead of
+    dying on the first throttle."""
+    omit_temp = False
+    attempts = 0
+    while True:
+        call_kw = dict(kwargs)
+        if omit_temp:
+            call_kw.pop("temperature", None)
+        try:
+            resp = client.chat.completions.create(**call_kw)
+        except BadRequestError as exc:
+            err = str(exc).lower()
+            if not omit_temp and "temperature" in err and (
+                "unsupported" in err or "only the default" in err or "default (1)" in err
+            ):
+                omit_temp = True
+                continue
+            raise
+        except APIStatusError as exc:
+            status = getattr(exc, "status_code", 0) or 0
+            if (status == 429 or status >= 500) and attempts < _MAX_RETRIES:
+                attempts += 1
+                time.sleep(_backoff(attempts))
+                continue
+            raise
+        except (APIConnectionError, APITimeoutError):
+            if attempts < _MAX_RETRIES:
+                attempts += 1
+                time.sleep(_backoff(attempts))
+                continue
+            raise
+        # Gateway sometimes returns HTTP 200 with an empty choices list when the
+        # provider is exhausted — indexing choices[0] would crash the turn.
+        if not getattr(resp, "choices", None):
+            if attempts < _MAX_RETRIES:
+                attempts += 1
+                time.sleep(_backoff(attempts))
+                continue
+            raise RuntimeError("LLM gateway returned no choices after retries")
+        return resp
+
+
+def _extract_usage(resp: Any) -> dict[str, int]:
+    """Pull token counts from a response's usage object (best-effort)."""
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+    pt = int(getattr(u, "prompt_tokens", 0) or 0)
+    ct = int(getattr(u, "completion_tokens", 0) or 0)
+    cached = 0
+    det = getattr(u, "prompt_tokens_details", None)
+    if det is not None:
+        cached = int(getattr(det, "cached_tokens", 0) or 0)
+    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct, "cached_tokens": cached}
 
 
 def _resolve_jailed_path(root: Path, rel_path: str) -> Path:
@@ -145,6 +227,43 @@ def _tool_workspace_grep(root: Path, pattern: str, file_glob: str = "*") -> str:
     )
 
 
+def _syntax_check(rel_path: str, content: str) -> str | None:
+    """Reject writes that would leave a file un-parseable. Returns an error string
+    or None if OK. Guards .py (compile) and .json (loads); other types pass."""
+    low = rel_path.lower()
+    if low.endswith(".py"):
+        try:
+            compile(content, rel_path, "exec")
+        except SyntaxError as e:
+            return f"ERROR: refusing to write — Python syntax error at line {e.lineno}: {e.msg}"
+    elif low.endswith(".json"):
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            return f"ERROR: refusing to write — invalid JSON: {e}"
+    return None
+
+
+def _backup_existing(root: Path, fp: Path, rel_path: str) -> str | None:
+    """Copy an existing file into <root>/.backups/wschat/<ts>/ before overwriting it,
+    so any edit is reversible. Best-effort; returns the backup path or None."""
+    if not fp.exists():
+        return None
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        dest = root / ".backups" / "wschat" / ts / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fp, dest)
+        # prune old backups of this file (keep most recent _MAX_FILE_BACKUPS)
+        wschat_root = root / ".backups" / "wschat"
+        stamps = sorted(d for d in wschat_root.iterdir() if d.is_dir()) if wschat_root.exists() else []
+        for old in stamps[:-_MAX_FILE_BACKUPS]:
+            shutil.rmtree(old, ignore_errors=True)
+        return str(dest.relative_to(root))
+    except OSError:
+        return None
+
+
 def _tool_workspace_write(
     *,
     root: Path,
@@ -159,14 +278,64 @@ def _tool_workspace_write(
         return f"ERROR: {e}"
     if fp.exists() and fp.is_dir():
         return "ERROR: path is directory"
+    syntax_err = _syntax_check(rel_path, content)
+    if syntax_err:
+        return syntax_err
     try:
+        backup = _backup_existing(root, fp, rel_path)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
         excerpt = "\n".join(content.splitlines()[:40])
         if len(content) > 8000:
             excerpt += "\n...(file truncated for log)"
         state_store.save_workspace_chat_edit(session_id, project_id, rel_path, excerpt[:2000])
-        return f"OK: wrote {rel_path} ({len(content)} bytes)"
+        suffix = f" (backup: {backup})" if backup else " (new file)"
+        return f"OK: wrote {rel_path} ({len(content)} bytes){suffix}"
+    except OSError as e:
+        return f"ERROR: write failed: {e}"
+
+
+def _tool_workspace_edit(
+    *,
+    root: Path,
+    session_id: str,
+    project_id: str,
+    rel_path: str,
+    old: str,
+    new: str,
+) -> str:
+    """Surgical edit: replace an exact substring `old` with `new` in a file.
+    Preferred over full-file rewrite — safer for large files (no truncation /
+    accidental deletion of unrelated code). `old` must occur exactly once."""
+    try:
+        fp = _resolve_jailed_path(root, rel_path)
+    except ValueError as e:
+        return f"ERROR: {e}"
+    if not fp.exists() or fp.is_dir():
+        return "ERROR: file not found"
+    if not old:
+        return "ERROR: 'old' text is required (use workspace_write_file to create a file)"
+    try:
+        text = fp.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"ERROR: read failed: {e}"
+    count = text.count(old)
+    if count == 0:
+        return "ERROR: 'old' text not found — read the file and copy the exact text (incl. whitespace)"
+    if count > 1:
+        return f"ERROR: 'old' text appears {count} times — add surrounding context so it is unique"
+    updated = text.replace(old, new, 1)
+    syntax_err = _syntax_check(rel_path, updated)
+    if syntax_err:
+        return syntax_err
+    try:
+        backup = _backup_existing(root, fp, rel_path)
+        fp.write_text(updated, encoding="utf-8")
+        state_store.save_workspace_chat_edit(
+            session_id, project_id, rel_path,
+            f"edit: -{len(old)}/+{len(new)} chars\n{new[:1000]}"[:2000],
+        )
+        return f"OK: edited {rel_path} (backup: {backup})" if backup else f"OK: edited {rel_path}"
     except OSError as e:
         return f"ERROR: write failed: {e}"
 
@@ -221,8 +390,36 @@ def _openai_tools(allow_writes: bool) -> list[dict[str, Any]]:
         base.append({
             "type": "function",
             "function": {
+                "name": "workspace_edit_file",
+                "description": (
+                    "PREFERRED for changing an existing file: replace an exact substring "
+                    "`old` with `new`. `old` must appear exactly once (add surrounding "
+                    "context to make it unique). Safer than a full rewrite — no truncation "
+                    "or accidental deletion of unrelated code. The prior file is backed up "
+                    "and .py/.json are syntax-checked before the write is accepted."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old": {"type": "string", "description": "Exact text to replace (must be unique in the file)"},
+                        "new": {"type": "string", "description": "Replacement text"},
+                    },
+                    "required": ["path", "old", "new"],
+                    "additionalProperties": False,
+                },
+            },
+        })
+        base.append({
+            "type": "function",
+            "function": {
                 "name": "workspace_write_file",
-                "description": "Replace entire file content (UTF-8). Creates parent directories.",
+                "description": (
+                    "Replace ENTIRE file content (UTF-8); creates parent dirs. Use for NEW "
+                    "files or a full rewrite of a small file — for edits to an existing file "
+                    "prefer workspace_edit_file. The prior file is backed up and .py/.json "
+                    "are syntax-checked before the write is accepted."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -265,6 +462,17 @@ def _invoke_tool(
             project_id=project_id,
             rel_path=args.get("path") or "",
             content=args.get("content") or "",
+        )
+    if name == "workspace_edit_file":
+        if not allow_writes:
+            return "ERROR: file writes disabled for this request"
+        return _tool_workspace_edit(
+            root=root,
+            session_id=session_id,
+            project_id=project_id,
+            rel_path=args.get("path") or "",
+            old=args.get("old") or "",
+            new=args.get("new") or "",
         )
     return f"ERROR: unknown tool {name}"
 
@@ -317,6 +525,10 @@ def iter_workspace_chat_turn(
     tools = _openai_tools(allow_writes)
 
     assistant_blob = ""
+    # Per-turn token burn, accumulated across the loop's LLM calls. Captured from
+    # each response's usage object directly (NOT via the shared record_usage, so the
+    # supervisor's build telemetry is never contaminated).
+    turn = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0, "calls": 0}
 
     def out(obj: dict[str, Any]) -> str:
         return json.dumps(obj, default=str) + "\n"
@@ -335,18 +547,19 @@ def iter_workspace_chat_turn(
                 "temperature": 0.2,
             }
             try:
-                resp = client.chat.completions.create(**kwargs)
-            except BadRequestError as exc:
-                err = str(exc).lower()
-                if "temperature" in err and ("unsupported" in err or "only the default" in err):
-                    kwargs.pop("temperature", None)
-                    resp = client.chat.completions.create(**kwargs)
-                else:
-                    yield out({"type": "error", "message": str(exc)})
-                    return
+                resp = _robust_chat(client, **kwargs)
             except Exception as exc:
                 yield out({"type": "error", "message": str(exc)})
+                # Persist whatever tokens were already burned before the failure.
+                _persist_usage(session_id, project_id, turn)
+                yield out({"type": "usage", "scope": "turn", **turn})
                 return
+
+            u = _extract_usage(resp)
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+                turn[k] += u[k]
+            turn["calls"] += 1
+            yield out({"type": "usage", "scope": "call", **u})
 
             choice = resp.choices[0]
             msg = choice.message
@@ -359,6 +572,8 @@ def iter_workspace_chat_turn(
 
             if not tool_calls:
                 state_store.add_workspace_chat_message(session_id, "assistant", assistant_blob.strip() or text)
+                _persist_usage(session_id, project_id, turn)
+                yield out({"type": "usage", "scope": "turn", **turn})
                 yield out({"type": "done", "ok": True, "reason": "final"})
                 return
 
@@ -406,11 +621,27 @@ def iter_workspace_chat_turn(
         state_store.add_workspace_chat_message(
             session_id, "assistant", assistant_blob.strip() or "(stopped: max iterations)",
         )
+        _persist_usage(session_id, project_id, turn)
+        yield out({"type": "usage", "scope": "turn", **turn})
         yield out({"type": "done", "ok": False, "reason": "max_iterations"})
 
     finally:
         if not lock_acquired:
             pass
+
+
+def _persist_usage(session_id: str, project_id: str, turn: dict[str, int]) -> None:
+    """Best-effort persist of a turn's token burn (survives reload / feeds the UI)."""
+    if turn.get("total_tokens", 0) <= 0:
+        return
+    try:
+        state_store.save_workspace_chat_usage(
+            session_id=session_id, project_id=project_id,
+            prompt_tokens=turn["prompt_tokens"], completion_tokens=turn["completion_tokens"],
+            total_tokens=turn["total_tokens"], cached_tokens=turn["cached_tokens"],
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break a turn
+        pass
 
 
 def try_acquire_workspace_chat_lock() -> bool:

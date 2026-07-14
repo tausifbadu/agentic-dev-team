@@ -167,6 +167,20 @@ CREATE TABLE IF NOT EXISTS workspace_chat_edits (
     created_at TEXT NOT NULL
 );
 
+-- Per-turn token burn for a workspace-chat session (one row per turn). Kept
+-- separate from the agent pipeline's iteration_usage so the two never mix.
+CREATE TABLE IF NOT EXISTS workspace_chat_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ws_chat_usage_session ON workspace_chat_usage(session_id);
+
 -- One row per (run, story) execution — an append-only history that survives
 -- re-runs (which overwrite the workspace files + story status). The generated
 -- code for each execution lives in tool_calls (write_file args), keyed by the
@@ -1375,6 +1389,41 @@ def list_workspace_chat_edits(session_id: str | None = None, limit: int = 50) ->
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def save_workspace_chat_usage(
+    *, session_id: str, project_id: str = "default", prompt_tokens: int = 0,
+    completion_tokens: int = 0, total_tokens: int = 0, cached_tokens: int = 0,
+) -> None:
+    """Append one workspace-chat turn's token burn."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO workspace_chat_usage (session_id, project_id, prompt_tokens, "
+        "completion_tokens, total_tokens, cached_tokens, created_at) VALUES (?,?,?,?,?,?,?)",
+        (session_id, project_id, prompt_tokens, completion_tokens, total_tokens,
+         cached_tokens, _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_workspace_chat_usage(session_id: str) -> dict:
+    """Session token totals + turn count for the workspace-chat token display."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS turns, "
+        "COALESCE(SUM(prompt_tokens),0) AS prompt_tokens, "
+        "COALESCE(SUM(completion_tokens),0) AS completion_tokens, "
+        "COALESCE(SUM(total_tokens),0) AS total_tokens, "
+        "COALESCE(SUM(cached_tokens),0) AS cached_tokens "
+        "FROM workspace_chat_usage WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {
+        "turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+        "total_tokens": 0, "cached_tokens": 0,
+    }
 
 
 # --- Backward compatibility with JSON-based callers ---

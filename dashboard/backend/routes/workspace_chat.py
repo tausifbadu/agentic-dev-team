@@ -71,3 +71,9 @@ def stream_workspace_chat_message(body: MessageBody):
 @router.get("/workspace-chat/edits")
 def list_chat_edits(session_id: str | None = None, limit: int = 40):
     return {"edits": state_store.list_workspace_chat_edits(session_id=session_id, limit=limit)}
+
+
+@router.get("/workspace-chat/usage")
+def get_chat_usage(session_id: str):
+    """Session token totals (persisted) for the token-burn display."""
+    return state_store.get_workspace_chat_usage(session_id)

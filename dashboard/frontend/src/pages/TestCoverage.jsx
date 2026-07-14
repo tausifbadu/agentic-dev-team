@@ -77,7 +77,10 @@ export default function TestCoverage() {
 
   useEffect(() => {
     api.listProjects()
-      .then((ps) => setProjects((ps || []).map((p) => p.project_id || p.slug || p).filter(Boolean)))
+      .then((r) => {
+        const ids = (r?.projects || []).map((p) => p.id).filter(Boolean);
+        setProjects(ids.length ? ids : ["default"]);
+      })
       .catch(() => setProjects(["default"]));
   }, []);
 
@@ -141,8 +144,12 @@ export default function TestCoverage() {
             <Dropdown
               value={projectId}
               onChange={setProjectId}
-              options={projects.map((p) => ({ value: p, label: p }))}
+              options={projects.map((p) => ({
+                value: p,
+                label: p === "default" ? "default (workspace/)" : p,
+              }))}
               size="sm"
+              className="min-w-[220px]"
             />
             <Button
               variant="primary"
