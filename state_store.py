@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS enhancements (
     status TEXT NOT NULL DEFAULT 'pending',
     result_message TEXT DEFAULT '',
     backup_path TEXT DEFAULT '',
+    staging_path TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -355,6 +356,8 @@ def init_db() -> None:
     for alter in (
         "ALTER TABLE storypacks ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'",
         "ALTER TABLE enhancements ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'",
+        # Phase-2 diff gate: staged (un-promoted) enhancement copy awaiting review.
+        "ALTER TABLE enhancements ADD COLUMN staging_path TEXT DEFAULT ''",
     ):
         try:
             conn.execute(alter)
@@ -1088,6 +1091,17 @@ def update_enhancement_status(enhance_id: str, status: str, result_message: str 
             "UPDATE enhancements SET status = ?, result_message = ?, completed_at = ? WHERE id = ?",
             (status, result_message, completed_at, enhance_id),
         )
+    conn.commit()
+    conn.close()
+
+
+def set_enhancement_staging(enhance_id: str, staging_path: str) -> None:
+    """Record (or clear) the staged, un-promoted copy path for the diff gate."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE enhancements SET staging_path = ? WHERE id = ?",
+        (staging_path, enhance_id),
+    )
     conn.commit()
     conn.close()
 

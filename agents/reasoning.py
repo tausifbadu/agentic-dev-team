@@ -224,44 +224,92 @@ def render_context(root: Path, paths: list[Path]) -> str:
 
 _COPY_IGNORE = shutil.ignore_patterns("node_modules", ".venv", "__pycache__", "dist")
 
+# What a full project snapshot captures. Restoring these back over the live
+# workspace returns it to its exact pre-enhancement state. Kept in sync with
+# workspace_paths.ensure_project_layout (backend/frontend/contracts/tests).
+_BACKUP_SUBDIRS = ("backend", "frontend", "tests", "contracts")
+_BACKUP_FILES = ("scope.json",)
+
 _BACKUPS_DIR = Path(__file__).parent.parent / "workspace" / ".backups"
 
 
 def backup_workspace(workspace_dir: Path, label: str = "") -> str:
-    """Create a timestamped backup of the workspace before an enhancement.
+    """Create a timestamped full-project snapshot before an enhancement.
+
+    Captures every subdir in ``_BACKUP_SUBDIRS`` plus top-level files in
+    ``_BACKUP_FILES`` (e.g. ``scope.json``) so a later ``restore_backup`` returns
+    the workspace to its exact pre-enhancement state. Each item is copied
+    independently: if one subdir fails to copy, the rest still make it into the
+    backup so rollback remains available (best-effort, never aborts the run).
 
     Returns the absolute path to the backup directory.
     """
     _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    # Microsecond precision so two backups in the same second can't collide and
+    # get silently merged by dirs_exist_ok=True.
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S_%f")
     tag = f"_{label}" if label else ""
     backup_name = f"backup_{ts}{tag}"
     backup_path = _BACKUPS_DIR / backup_name
 
-    for subdir_name in ("backend", "frontend"):
+    for subdir_name in _BACKUP_SUBDIRS:
         src = workspace_dir / subdir_name
-        if src.exists():
-            shutil.copytree(src, backup_path / subdir_name, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+        if src.is_dir():
+            try:
+                shutil.copytree(src, backup_path / subdir_name, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+            except OSError:
+                # Skip this subdir but keep the rest of the snapshot.
+                pass
+
+    for file_name in _BACKUP_FILES:
+        src = workspace_dir / file_name
+        if src.is_file():
+            try:
+                backup_path.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, backup_path / file_name)
+            except OSError:
+                pass
 
     return str(backup_path)
 
 
 def restore_backup(backup_path: str, workspace_dir: Path) -> None:
-    """Restore a workspace from a previously created backup."""
+    """Restore a workspace from a previously created backup.
+
+    Before overwriting anything, snapshots the *current* live state into a
+    ``pre_rollback`` backup so the rollback is itself undoable. Then restores
+    every subdir/file present in the backup over the live workspace.
+    """
     bp = Path(backup_path)
     if not bp.exists():
         raise FileNotFoundError(f"Backup not found: {backup_path}")
 
-    for subdir_name in ("backend", "frontend"):
+    # Safety net: capture where we are now so a rollback can be reverted too.
+    try:
+        backup_workspace(workspace_dir, label="pre_rollback")
+    except Exception:
+        # Never let the safety snapshot block the rollback the user asked for.
+        pass
+
+    for subdir_name in _BACKUP_SUBDIRS:
         backup_sub = bp / subdir_name
         dest_sub = workspace_dir / subdir_name
-        if backup_sub.exists():
+        if backup_sub.is_dir():
             if dest_sub.exists():
                 try:
                     shutil.rmtree(dest_sub)
                 except OSError:
                     pass
             shutil.copytree(backup_sub, dest_sub, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+
+    for file_name in _BACKUP_FILES:
+        backup_file = bp / file_name
+        dest_file = workspace_dir / file_name
+        if backup_file.is_file():
+            try:
+                shutil.copy2(backup_file, dest_file)
+            except OSError:
+                pass
 
 
 def list_backups() -> list[dict]:
@@ -274,6 +322,69 @@ def list_backups() -> list[dict]:
             subdirs = [d.name for d in p.iterdir() if d.is_dir()]
             result.append({"name": p.name, "path": str(p), "contents": subdirs})
     return result
+
+
+_STAGING_DIR = Path(__file__).parent.parent / "workspace" / ".staging"
+
+
+def stage_workspace(workspace_dir: Path, label: str) -> str:
+    """Create an isolated staging copy of the project so an enhancement can run
+    into it WITHOUT touching the live workspace. Returns the staging dir path.
+
+    Captures the same set as ``backup_workspace`` (``_BACKUP_SUBDIRS`` +
+    ``_BACKUP_FILES``). The staging tree lives outside any project dir so it is
+    never itself picked up by a subsequent copy.
+    """
+    _STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _STAGING_DIR / f"stage_{label}"
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for subdir_name in _BACKUP_SUBDIRS:
+        src = workspace_dir / subdir_name
+        if src.is_dir():
+            shutil.copytree(src, dest / subdir_name, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+    for file_name in _BACKUP_FILES:
+        src = workspace_dir / file_name
+        if src.is_file():
+            shutil.copy2(src, dest / file_name)
+
+    return str(dest)
+
+
+def promote_workspace(staging_dir: str, workspace_dir: Path) -> None:
+    """Copy a staged project over the live workspace. The caller is responsible
+    for taking a backup first (so the promote can be rolled back)."""
+    sd = Path(staging_dir)
+    if not sd.exists():
+        raise FileNotFoundError(f"Staging dir not found: {staging_dir}")
+
+    for subdir_name in _BACKUP_SUBDIRS:
+        staged_sub = sd / subdir_name
+        dest_sub = workspace_dir / subdir_name
+        if staged_sub.is_dir():
+            if dest_sub.exists():
+                try:
+                    shutil.rmtree(dest_sub)
+                except OSError:
+                    pass
+            shutil.copytree(staged_sub, dest_sub, dirs_exist_ok=True, ignore=_COPY_IGNORE)
+    for file_name in _BACKUP_FILES:
+        staged_file = sd / file_name
+        if staged_file.is_file():
+            try:
+                shutil.copy2(staged_file, workspace_dir / file_name)
+            except OSError:
+                pass
+
+
+def discard_staging(staging_dir: str) -> None:
+    """Remove a staging copy (enhancement rejected at the diff gate)."""
+    try:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def create_scratch_copy(source_dir: Path, prefix: str) -> Path:

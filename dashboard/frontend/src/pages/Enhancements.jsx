@@ -18,10 +18,27 @@ import {
 // story/run STATUS_STYLES, so it stays local rather than using <StatusBadge>.
 const STATUS_STYLES = {
   pending: "bg-slate-500/15 text-slate-400",
+  planning: "bg-indigo-500/15 text-indigo-400",
+  pending_review: "bg-violet-500/15 text-violet-400",
   running: "bg-amber-500/15 text-amber-400",
+  pending_promote: "bg-teal-500/15 text-teal-400",
   success: "bg-emerald-500/15 text-emerald-400",
   failed: "bg-rose-500/15 text-rose-400",
+  rejected: "bg-slate-500/15 text-slate-400",
+  discarded: "bg-slate-500/15 text-slate-400",
   rolled_back: "bg-sky-500/15 text-sky-400",
+};
+
+// Human-friendly status labels.
+const STATUS_LABEL = {
+  pending_review: "review",
+  pending_promote: "diff review",
+};
+
+const DIFF_STATUS_STYLE = {
+  added: "bg-emerald-500/15 text-emerald-400",
+  modified: "bg-amber-500/15 text-amber-400",
+  deleted: "bg-rose-500/15 text-rose-400",
 };
 
 export default function Enhancements() {
@@ -45,13 +62,16 @@ export default function Enhancements() {
     api.listProjects().then((r) => setProjects(r.projects || [])).catch(console.error);
   }, []);
 
+  // Poll while anything is in-flight: the backend is running (planning/applying)
+  // OR a row is still 'planning' locally (so we catch the -> pending_review flip).
+  const busy = enhanceStatus?.running || enhancements.some((e) => e.status === "planning");
   useEffect(() => {
-    if (!enhanceStatus?.running) return;
+    if (!busy) return;
     const poll = setInterval(() => {
       loadEnhancements();
     }, 3000);
     return () => clearInterval(poll);
-  }, [enhanceStatus?.running]);
+  }, [busy]);
 
   const handleSubmit = async () => {
     if (!description.trim()) return;
@@ -64,7 +84,7 @@ export default function Enhancements() {
         context: context.trim(),
         project_id: projectId,
       });
-      setSubmitResult({ ok: true, msg: `Enhancement submitted (${res.enhance_id})` });
+      setSubmitResult({ ok: true, msg: `Plan requested (${res.enhance_id}) — review it below before it runs` });
       setDescription("");
       setContext("");
       loadEnhancements();
@@ -97,7 +117,7 @@ export default function Enhancements() {
         <CardHeader title="New Enhancement Request" />
         <div className="px-5 py-4 space-y-4">
           <p className="text-[11px] text-fg-faint -mt-1">
-            Describe what you want to add or change — PM will create a story, then the agent implements it
+            Describe what you want to add or change — PM drafts a plan you review and approve <span className="text-fg-muted">before</span> any code changes
           </p>
           <Field label="Project workspace" htmlFor="enh-project-select">
             <Select
@@ -205,9 +225,13 @@ export default function Enhancements() {
 }
 
 function EnhancementRow({ enh, onRefresh }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(
+    enh.status === "pending_review" || enh.status === "pending_promote"
+  );
   const [rolling, setRolling] = useState(false);
   const [rollResult, setRollResult] = useState(null);
+  const [acting, setActing] = useState(null); // "approve" | "reject" | null
+  const [actResult, setActResult] = useState(null);
   let storyItems = [];
   try {
     const parsed = typeof enh.story_json === "string" ? JSON.parse(enh.story_json) : enh.story_json;
@@ -246,7 +270,7 @@ function EnhancementRow({ enh, onRefresh }) {
           {formatTime(enh.created_at)}
         </span>
         <Badge className={`border-transparent ${STATUS_STYLES[enh.status] || STATUS_STYLES.pending}`}>
-          {enh.status}
+          {STATUS_LABEL[enh.status] || enh.status}
         </Badge>
         <Badge
           className={`border-transparent ${
@@ -320,6 +344,68 @@ function EnhancementRow({ enh, onRefresh }) {
               </div>
             </div>
           )}
+          {enh.status === "pending_review" && (
+            <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-border-subtle/50 mt-1">
+              <span className="text-[11px] text-violet-400 font-medium">
+                Review this plan — nothing has changed yet.
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  loading={acting === "approve"}
+                  disabled={!!acting}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    setActing("approve");
+                    setActResult(null);
+                    try {
+                      await api.approveEnhancement(enh.id);
+                      setActResult({ ok: true, msg: "Approved — applying plan…" });
+                      onRefresh?.();
+                    } catch (err) {
+                      setActResult({ ok: false, msg: err.message });
+                    } finally {
+                      setActing(null);
+                    }
+                  }}
+                >
+                  {acting === "approve" ? "Approving…" : "Approve & Run"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={acting === "reject"}
+                  disabled={!!acting}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!confirm("Reject this plan? It will not run.")) return;
+                    setActing("reject");
+                    setActResult(null);
+                    try {
+                      await api.rejectEnhancement(enh.id);
+                      setActResult({ ok: true, msg: "Plan rejected." });
+                      onRefresh?.();
+                    } catch (err) {
+                      setActResult({ ok: false, msg: err.message });
+                    } finally {
+                      setActing(null);
+                    }
+                  }}
+                  className="bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 hover:text-rose-400 border-rose-500/20"
+                >
+                  {acting === "reject" ? "Rejecting…" : "Reject"}
+                </Button>
+              </div>
+              {actResult && (
+                <span className={`text-[11px] ${actResult.ok ? "text-emerald-400" : "text-rose-400"}`}>
+                  {actResult.msg}
+                </span>
+              )}
+            </div>
+          )}
+          {enh.status === "pending_promote" && (
+            <DiffGate enh={enh} onRefresh={onRefresh} />
+          )}
           {enh.result_message && (
             <div>
               <p className="text-[10px] text-fg-faint uppercase tracking-wider font-medium mb-1">Result</p>
@@ -330,7 +416,7 @@ function EnhancementRow({ enh, onRefresh }) {
               </pre>
             </div>
           )}
-          {enh.backup_path && enh.status !== "rolled_back" && enh.status !== "running" && enh.status !== "pending" && (
+          {enh.backup_path && (enh.status === "success" || enh.status === "failed") && (
             <div className="flex items-center gap-3 pt-1">
               <Button
                 variant="secondary"
@@ -381,6 +467,144 @@ function EnhancementRow({ enh, onRefresh }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function DiffGate({ enh, onRefresh }) {
+  const [diff, setDiff] = useState(null); // { files, note }
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState({}); // path -> bool
+  const [acting, setActing] = useState(null); // "promote" | "discard"
+  const [actResult, setActResult] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getEnhancementDiff(enh.id)
+      .then((d) => alive && setDiff(d))
+      .catch((err) => alive && setDiff({ files: [], note: err.message }))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [enh.id]);
+
+  const files = diff?.files || [];
+
+  const doAction = async (kind) => {
+    if (kind === "discard" && !confirm("Discard these staged changes? The workspace is untouched.")) return;
+    setActing(kind);
+    setActResult(null);
+    try {
+      if (kind === "promote") await api.promoteEnhancement(enh.id);
+      else await api.discardEnhancement(enh.id);
+      setActResult({ ok: true, msg: kind === "promote" ? "Promoted to workspace." : "Staged changes discarded." });
+      onRefresh?.();
+    } catch (err) {
+      setActResult({ ok: false, msg: err.message });
+    } finally {
+      setActing(null);
+    }
+  };
+
+  return (
+    <div className="border-t border-border-subtle/50 mt-1 pt-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] text-teal-400 uppercase tracking-wider font-medium">
+          Staged changes — review before promoting {files.length ? `(${files.length} file${files.length > 1 ? "s" : ""})` : ""}
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-xs text-fg-faint">Loading diff…</p>
+      ) : files.length === 0 ? (
+        <p className="text-xs text-fg-muted">
+          {diff?.note || "No file changes detected in the staged copy."}
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {files.map((f) => (
+            <div key={f.path} className="rounded-lg bg-surface-0 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setExpanded((e) => ({ ...e, [f.path]: !e[f.path] }))}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-2/40 transition-colors"
+              >
+                <Badge className={`border-transparent ${DIFF_STATUS_STYLE[f.status] || "bg-slate-500/15 text-slate-400"}`}>
+                  {f.status}
+                </Badge>
+                <span className="text-xs font-mono text-fg-secondary flex-1 truncate">{f.path}</span>
+                {(f.additions > 0 || f.deletions > 0) && (
+                  <span className="text-[10px] font-mono tabular-nums">
+                    <span className="text-emerald-400">+{f.additions}</span>{" "}
+                    <span className="text-rose-400">-{f.deletions}</span>
+                  </span>
+                )}
+                <svg
+                  width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"
+                  className={`text-fg-faint transition-transform ${expanded[f.path] ? "rotate-90" : ""}`}
+                >
+                  <polyline points="5 3 9 7 5 11" />
+                </svg>
+              </button>
+              {expanded[f.path] && (
+                <pre className="px-3 pb-2 text-[11px] font-mono overflow-x-auto whitespace-pre leading-relaxed max-h-96">
+                  {(f.diff || "").split("\n").map((ln, i) => (
+                    <div
+                      key={i}
+                      className={
+                        ln.startsWith("+") && !ln.startsWith("+++")
+                          ? "text-emerald-400/90"
+                          : ln.startsWith("-") && !ln.startsWith("---")
+                          ? "text-rose-400/90"
+                          : ln.startsWith("@@")
+                          ? "text-sky-400/80"
+                          : "text-fg-muted"
+                      }
+                    >
+                      {ln || " "}
+                    </div>
+                  ))}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 pt-1">
+        <Button
+          size="sm"
+          loading={acting === "promote"}
+          disabled={!!acting}
+          onClick={(e) => {
+            e.stopPropagation();
+            doAction("promote");
+          }}
+        >
+          {acting === "promote" ? "Promoting…" : "Promote to Workspace"}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          loading={acting === "discard"}
+          disabled={!!acting}
+          onClick={(e) => {
+            e.stopPropagation();
+            doAction("discard");
+          }}
+          className="bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 hover:text-rose-400 border-rose-500/20"
+        >
+          {acting === "discard" ? "Discarding…" : "Discard"}
+        </Button>
+        <span className="text-[10px] text-fg-faint">Nothing has touched your workspace yet.</span>
+        {actResult && (
+          <span className={`text-[11px] ${actResult.ok ? "text-emerald-400" : "text-rose-400"}`}>
+            {actResult.msg}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

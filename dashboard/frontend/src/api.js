@@ -201,6 +201,20 @@ export const api = {
 
   getEnhancement: (id) => request(`/enhancements/${id}`),
 
+  approveEnhancement: (id) =>
+    request(`/enhancements/${id}/approve`, { method: "POST" }),
+
+  rejectEnhancement: (id) =>
+    request(`/enhancements/${id}/reject`, { method: "POST" }),
+
+  getEnhancementDiff: (id) => request(`/enhancements/${id}/diff`),
+
+  promoteEnhancement: (id) =>
+    request(`/enhancements/${id}/promote`, { method: "POST" }),
+
+  discardEnhancement: (id) =>
+    request(`/enhancements/${id}/discard`, { method: "POST" }),
+
   rollbackEnhancement: (id) =>
     request(`/enhancements/${id}/rollback`, { method: "POST" }),
 
@@ -222,6 +236,9 @@ export const api = {
         allow_writes: !!allow_writes,
       }),
     }),
+
+  getWorkspaceChatUsage: (sessionId) =>
+    request(`/workspace-chat/usage?session_id=${encodeURIComponent(sessionId)}`),
 
   listWorkspaceChatEdits: (sessionId, limit = 40) => {
     const q = new URLSearchParams();
