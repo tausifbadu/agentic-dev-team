@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api";
 import {
   PageHeader,
@@ -225,9 +225,20 @@ export default function Enhancements() {
 }
 
 function EnhancementRow({ enh, onRefresh }) {
-  const [open, setOpen] = useState(
-    enh.status === "pending_review" || enh.status === "pending_promote"
-  );
+  const needsReview = enh.status === "pending_review" || enh.status === "pending_promote";
+  const [open, setOpen] = useState(needsReview);
+
+  // Auto-open the moment a row *transitions* into a review state (e.g. planning
+  // -> pending_review while you watch), but don't fight a manual collapse: the
+  // effect only fires on an actual status change, not on every re-render.
+  const prevStatus = useRef(enh.status);
+  useEffect(() => {
+    const changed = enh.status !== prevStatus.current;
+    if (changed && (enh.status === "pending_review" || enh.status === "pending_promote")) {
+      setOpen(true);
+    }
+    prevStatus.current = enh.status;
+  }, [enh.status]);
   const [rolling, setRolling] = useState(false);
   const [rollResult, setRollResult] = useState(null);
   const [acting, setActing] = useState(null); // "approve" | "reject" | null
@@ -272,6 +283,12 @@ function EnhancementRow({ enh, onRefresh }) {
         <Badge className={`border-transparent ${STATUS_STYLES[enh.status] || STATUS_STYLES.pending}`}>
           {STATUS_LABEL[enh.status] || enh.status}
         </Badge>
+        {needsReview && !open && (
+          <span className="flex items-center gap-1 text-[10px] font-medium text-violet-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+            action needed
+          </span>
+        )}
         <Badge
           className={`border-transparent ${
             enh.agent_type === "both"
