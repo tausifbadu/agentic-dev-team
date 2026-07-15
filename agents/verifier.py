@@ -28,7 +28,15 @@ _SUFFIXES = {
     "testing": {".py"},
 }
 _EXTRA_FILES = {"requirements.txt", "package.json", "index.html"}
-_EVIDENCE_MAX = 20000
+# Total evidence budget shown to the reviewer. 20k was too small for a real backend
+# (a single repository file can be 30k+), so the most important file was truncated
+# away and every criterion it satisfied was marked UNMET. A generated POC backend is
+# ~40-60k of source; this fits it whole. One verify call per story, so the extra
+# reviewer tokens are cheap next to a spurious rescope loop.
+_EVIDENCE_MAX = 60000
+# A single oversized file is shown head+tail (not head-only) so validation logic deep
+# in the file survives, and it can't consume the whole budget and starve other files.
+_PER_FILE_MAX = 40000
 
 
 def _summarize_data_files(root: Path, budget: int = 6000) -> str:
@@ -197,6 +205,13 @@ def _collect_evidence(workspace_dir: Path, ownership: str) -> str:
                 txt = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            # An oversized single file gets head+tail so validation/behaviour deep in
+            # the file is still visible (truncating head-only hid exactly the code the
+            # criteria asked about).
+            if len(txt) > _PER_FILE_MAX:
+                head = txt[: _PER_FILE_MAX * 2 // 3]
+                tail = txt[-_PER_FILE_MAX // 3:]
+                txt = f"{head}\n\n... (middle of file omitted; {len(txt)} chars total) ...\n\n{tail}"
             rel = p.relative_to(root)
             chunk = f"=== {sub}/{rel} ===\n{txt}"
             if total + len(chunk) > _EVIDENCE_MAX:
