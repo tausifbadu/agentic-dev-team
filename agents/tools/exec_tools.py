@@ -601,6 +601,25 @@ def _run_python_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     )
 
 
+def _server_routes(port: int, timeout: int = 5) -> list[str]:
+    """List the routes the running app actually registered, via /openapi.json.
+
+    Used to turn a 404 into a self-correcting signal: the agent sees the real
+    paths (and prefix) instead of guessing. Returns [] if the spec is
+    unavailable (which itself signals the router never bootstrapped)."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/openapi.json", timeout=timeout) as r:
+            spec = json.loads(r.read(400_000).decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[str] = []
+    for p, methods in (spec.get("paths") or {}).items():
+        for m in methods or {}:
+            if str(m).lower() in ("get", "post", "put", "patch", "delete"):
+                out.append(f"{str(m).upper()} {p}")
+    return sorted(out)
+
+
 def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Boot uvicorn briefly, send one HTTP request, and return status + body.
 
@@ -710,6 +729,27 @@ def _http_check_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 "\n(note: 3xx redirects do not count as ok=True — use the canonical path "
                 "and json_body for POST, or expect 2xx.)"
             )
+        # A 404 usually means the path is wrong (e.g. missing a router prefix like
+        # /api/v1), NOT that the code is broken. Show the routes the app actually
+        # registered so the agent retries the right path instead of churning.
+        if status == 404:
+            routes = _server_routes(port)
+            if routes:
+                shown = routes[:40]
+                hint += (
+                    "\n(the server booted fine, but no route matches this path — you are"
+                    " probably missing a router prefix. Registered routes:\n  "
+                    + "\n  ".join(shown)
+                )
+                if len(routes) > 40:
+                    hint += f"\n  … and {len(routes) - 40} more"
+                hint += "\nRe-run http_check with one of these exact paths.)"
+            else:
+                hint += (
+                    "\n(404 and /openapi.json is unavailable — the app likely failed to"
+                    " register its routes. Use run_python to import main and surface the"
+                    " startup error before calling http_check again.)"
+                )
         return ToolResult(
             ok=ok_status,
             content=(
@@ -1477,6 +1517,8 @@ def register_exec_tools(registry: ToolRegistry) -> None:
             "Boot uvicorn briefly and send one HTTP request against the backend in scratch. "
             "Returns the response status and body. **ok=True** only for HTTP 2xx (not 3xx "
             "redirects). Use to verify endpoints; for POST include json_body. "
+            "On a 404 it lists the routes the app actually registered (from /openapi.json) — "
+            "check the prefix (e.g. /api/v1) and retry the exact path rather than editing code. "
         ),
         parameters_schema={
             "type": "object",

@@ -103,6 +103,10 @@ class AgentBase:
     workspace_subdir: Optional[str] = None  # "backend", "frontend", "tests" or None
     model_env_var: str = ""
     default_model: str = "codex/gpt-5.5"
+    # Per-story ReAct iteration cap (one attempt). This is the real bound on a
+    # single doomed story's cost — with no prompt caching each iteration re-sends
+    # the (compacted) transcript, so a story that flails for the full cap is
+    # expensive. Env-tunable via AGENTIC_ITERATION_CAP; defaults to the class value.
     iteration_cap: int = 50
 
     def __init__(self, ctx: RunContext, on_progress: ProgressCallback = None):
@@ -112,6 +116,12 @@ class AgentBase:
         from agents.llm_client import make_openai_client
         self.client = make_openai_client()
         self.model = os.getenv(self.model_env_var, self.default_model) if self.model_env_var else self.default_model
+        # Per-story iteration cap, tunable per agent type (AGENTIC_ITERATION_CAP_BACKEND
+        # /_FRONTEND/_TEST) or globally (AGENTIC_ITERATION_CAP), else the class default.
+        # Scope reductions per type: e.g. the frontend agent legitimately needs ~46
+        # iters for a from-scratch screen, so it must not be capped as low as backend.
+        _cap = os.getenv(f"AGENTIC_ITERATION_CAP_{self.agent_id.upper()}") or os.getenv("AGENTIC_ITERATION_CAP")
+        self.iteration_cap = int(_cap) if _cap else type(self).iteration_cap
 
         # Bus handler for incoming peer messages (must be installed by the caller
         # via `register_with_bus()` once the agent instance exists).

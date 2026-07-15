@@ -11,13 +11,30 @@ from .registry import Tool, ToolContext, ToolRegistry, ToolResult
 def _read_storypack_handler(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     import state_store
 
-    pack_id = args.get("pack_id") or ctx.storypack_id
+    requested = args.get("pack_id")
+    pack_id = requested or ctx.storypack_id
     if not pack_id:
         return ToolResult(ok=False, content="No pack_id available")
 
     pack = state_store.get_storypack(pack_id)
     if not pack:
-        return ToolResult(ok=False, content=f"Storypack {pack_id} not found")
+        # Agents frequently pass the REQUIREMENT id (req_*) or a stale id here.
+        # Self-correct instead of erroring: resolve requirement_id -> pack, then
+        # fall back to this run's actual storypack (the source of truth).
+        resolved = state_store.get_storypack_by_requirement(pack_id)
+        if resolved:
+            pack = resolved
+        elif ctx.storypack_id and pack_id != ctx.storypack_id:
+            pack = state_store.get_storypack(ctx.storypack_id)
+
+    if not pack:
+        return ToolResult(
+            ok=False,
+            content=(
+                f"Storypack {requested or pack_id} not found. This run's storypack id is "
+                f"{ctx.storypack_id or 'unknown'} — call read_storypack with no pack_id to read it."
+            ),
+        )
     return ToolResult(ok=True, content=json.dumps(pack, indent=2, default=str))
 
 
