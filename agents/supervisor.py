@@ -45,6 +45,23 @@ from schemas import Story
 import state_store
 
 
+# Markers of a transient/infrastructure failure (gateway throttling, network,
+# empty responses) — as opposed to a genuine "the agent couldn't do the story".
+# On these we must NOT ask PM to rescope (which permanently dilutes/halts a good
+# story) and must NOT record a failure-pattern (which poisons future PM planning).
+_TRANSIENT_FAILURE_MARKERS = (
+    "429", "rate limit", "rate_limit", "too many requests", "quota",
+    "timed out", "timeout", "apitimeout", "connection error", "apiconnection",
+    "no choices", "temporarily unavailable", "502", "503", "bad gateway",
+    "service unavailable",
+)
+
+
+def _is_transient_failure(*texts: str) -> bool:
+    blob = " ".join(t for t in texts if t).lower()
+    return any(m in blob for m in _TRANSIENT_FAILURE_MARKERS)
+
+
 @dataclass
 class SupervisorConfig:
     # Kept for backward compat with callers — no longer used by the runtime.
@@ -158,6 +175,12 @@ class Supervisor:
 
         # Pipeline state for the dashboard.
         self.outcomes: dict[str, StoryOutcome] = {}
+
+        # Set when a story fails on a transient/infra error (rate limit, timeout,
+        # gateway) so the run halts cleanly instead of rescoping good stories and
+        # burning the rest against a throttled gateway. Resume retries them as-is.
+        self._transient_halt = False
+        self._halt_reason = ""
 
     # ---------- Public entry point ----------
 
@@ -351,10 +374,34 @@ class Supervisor:
             self.outcomes[story.id] = outcome
             return outcome
 
-        # ---- Agent-reported failure → publish + ask PM for rescope only ----
         # Reset to pending_review (not a stuck "in_progress") so the board shows it
         # as runnable again and it stays selectable for a resume run.
         self._set_story_status(story.id, "pending_review")
+
+        # ---- Transient/infra failure → HALT, do NOT rescope ----
+        # A rate-limit/timeout/gateway crash is not the story's fault. Rescoping it
+        # would permanently dilute a good story for a transient reason, and a
+        # failure-pattern would teach PM the wrong lesson. Halt cleanly so a resume
+        # retries the SAME story (criteria intact) once the gateway recovers.
+        if _is_transient_failure(result.summary, getattr(result, "error", "") or ""):
+            outcome.status = "blocked"
+            outcome.summary = f"Blocked by transient/infra error (resume to retry): {result.summary[:300]}"
+            self._transient_halt = True
+            self._halt_reason = "transient gateway/infra error (e.g. rate limit) — resume to retry"
+            self._log(agent.agent_id, "error",
+                      f"Story '{story.title}' hit a transient error — halting run without rescope.",
+                      result.summary[:400])
+            self.bus.publish(
+                topic="story.blocked",
+                from_agent=agent.agent_id,
+                payload={"summary": result.summary},
+                story_id=story.id,
+                summary=f"Story blocked (transient): {result.summary[:110]}",
+            )
+            self.outcomes[story.id] = outcome
+            return outcome
+
+        # ---- Genuine agent-reported failure → publish + ask PM for rescope only ----
         self.bus.publish(
             topic="story.failed",
             from_agent=agent.agent_id,
@@ -610,12 +657,18 @@ class Supervisor:
     def _abort_remaining(self, stories: list[Story], reason: str) -> None:
         """Record stories that never ran (budget/halt) as failures, so they are
         counted instead of silently dropped from the tally."""
+        # On a transient halt the honest reason is the gateway/infra error, and the
+        # un-run stories should stay cleanly resumable rather than reading as real
+        # failures — so mark them "blocked".
+        if self._transient_halt and self._halt_reason:
+            reason = self._halt_reason
+        status = "blocked" if self._transient_halt else "failed"
         for s in stories:
             if s.id in self.outcomes:
                 continue
             self.outcomes[s.id] = StoryOutcome(
                 story_id=s.id, title=s.title, ownership=s.ownership,
-                status="failed", iterations=0, tool_calls=0,
+                status=status, iterations=0, tool_calls=0,
                 summary=f"Aborted: {reason}",
             )
             self._log("supervisor", "error", f"Aborted {s.title}: {reason}")
@@ -668,6 +721,8 @@ class Supervisor:
         return True
 
     def _budget_exceeded(self) -> bool:
+        if self._transient_halt:
+            return True
         if self.budget.wall_exceeded():
             self._log("supervisor", "error", "Wall-clock budget exceeded; halting run.")
             return True

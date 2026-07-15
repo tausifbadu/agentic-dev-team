@@ -31,6 +31,68 @@ _EXTRA_FILES = {"requirements.txt", "package.json", "index.html"}
 _EVIDENCE_MAX = 20000
 
 
+def _summarize_data_files(root: Path, budget: int = 6000) -> str:
+    """Compact evidence for data-file acceptance criteria.
+
+    Source-only evidence (.py) never shows the reviewer the actual data, so a
+    "create GeoJSON dataset" story — whose criteria are about counts, geometry,
+    coordinate order, naming, and PII — was ALWAYS judged UNMET even when the data
+    was correct. This summarizes each *.geojson / data/*.json compactly (feature
+    count, geometry types, property-key union, first coordinate, a sample) so those
+    criteria can actually be verified without dumping raw GeoJSON.
+    """
+    import json as _json
+
+    files = sorted(
+        p for p in root.rglob("*")
+        if p.is_file()
+        and not any(part in _IGNORED for part in p.parts)
+        and (
+            p.suffix.lower() == ".geojson"
+            or (p.suffix.lower() == ".json" and "data" in p.relative_to(root).parts[:-1])
+        )
+    )
+    lines: list[str] = []
+    used = 0
+    for p in files:
+        try:
+            d = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001
+            continue
+        feats = d.get("features") if isinstance(d, dict) else (d if isinstance(d, list) else None)
+        rel = p.relative_to(root)
+        if not isinstance(feats, list):
+            entry = f"- {rel}: JSON (not a FeatureCollection)"
+        else:
+            geoms = sorted({(f.get("geometry") or {}).get("type") for f in feats if isinstance(f, dict)} - {None})
+            keys = sorted({k for f in feats[:60] if isinstance(f, dict) for k in (f.get("properties") or {})})
+            sample = next((f for f in feats if isinstance(f, dict)), {})
+            sprops = _json.dumps(sample.get("properties") or {}, default=str)[:200]
+            coord = None
+            cc = (sample.get("geometry") or {}).get("coordinates")
+            while isinstance(cc, list) and cc and isinstance(cc[0], list):
+                cc = cc[0]
+            if isinstance(cc, list) and len(cc) >= 2 and all(isinstance(x, (int, float)) for x in cc[:2]):
+                coord = cc[:2]
+            entry = (
+                f"- {rel}: {len(feats)} features; geometry={geoms}; "
+                f"property_keys={keys}; first_coord[lon,lat]={coord}; sample_properties={sprops}"
+            )
+        if used + len(entry) > budget:
+            lines.append("  ... (more data files omitted)")
+            break
+        lines.append(entry)
+        used += len(entry)
+
+    if not lines:
+        return ""
+    return (
+        "=== data files summary (counts / geometry / property keys / first coordinate "
+        "[lon,lat] / sample properties — judge data criteria from this) ===\n"
+        + "\n".join(lines)
+    )
+
+
 def _collect_evidence(workspace_dir: Path, ownership: str) -> str:
     """Gather the actual produced source as the evidence the reviewer judges from."""
     sub = _SUBDIR.get(ownership, ownership)
@@ -48,6 +110,14 @@ def _collect_evidence(workspace_dir: Path, ownership: str) -> str:
             total += len(txt)
         except OSError:
             pass
+
+    # Data-file evidence (near the top so it survives the code-evidence budget) —
+    # this is what lets data-generation criteria be judged at all.
+    if root.exists():
+        data_summary = _summarize_data_files(root)
+        if data_summary:
+            parts.append(data_summary)
+            total += len(data_summary)
 
     if root.exists():
         suffixes = _SUFFIXES.get(ownership, {".py"})
